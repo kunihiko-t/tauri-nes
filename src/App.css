@@ -1,0 +1,73 @@
+.logo.vite:hover {
+  filter: drop-shadow(0 0 2em #747bff);
+}
+
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafb);
+}
+
+
+
+/* App.css */
+body {
+  font-family: 'Arial', sans-serif;
+  background-color: #f5f5f5;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+}
+
+.container {
+  text-align: center;
+  background-color: #ffffff;
+  padding: 2rem;
+  border-radius: 8px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+}
+
+h1 {
+  color: #333333;
+  margin-bottom: 1.5rem;
+}
+
+button {
+  background-color: #007bff;
+  color: #ffffff;
+  border: none;
+  padding: 10px 20px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #0056b3;
+}
+
+canvas {
+  margin-top: 1rem;
+  border: 1px solid #ccc;
+}
+
+
+#chrCanvas {
+  border: 1px solid black; /* 境界線を設定 */
+  width: 256px;  /* 幅を設定 */
+  height: 256px; /* 高さを設定 */
+}
+
+/* App.cssに追加 */
+.cpu-state {
+  text-align: left;
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #eee;
+  border-radius: 8px;
+}
+
+.cpu-state p {
+  margin: 0.5rem 0;
+}
