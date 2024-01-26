@@ -24,6 +24,69 @@ function App() {
     }, []);
 
 
+
+// キーボードイベントを処理し、Rustのバックエンドに送信する
+
+    useEffect(() => {
+
+        type KeyToButtonMap = {
+            [key: string]: keyof ControllerState;
+        };
+        const keyToButtonMap: KeyToButtonMap = {
+            'KeyZ': 'a_button',
+            'KeyX': 'b_button',
+            'Enter': 'start',
+            'ShiftRight': 'select',
+            'ArrowUp': 'up',
+            'ArrowDown': 'down',
+            'ArrowLeft': 'left',
+            'ArrowRight': 'right',
+        };
+        type ControllerState = {
+            a_button: boolean;
+            b_button: boolean;
+            start: boolean;
+            select: boolean;
+            up: boolean;
+            down: boolean;
+            left: boolean;
+            right: boolean;
+        };
+
+        const controllerState: ControllerState = {
+            a_button: false,
+            b_button: false,
+            start: false,
+            select: false,
+            up: false,
+            down: false,
+            left: false,
+            right: false,
+        };
+
+
+        const handleKeyEvent = (event: KeyboardEvent, isKeyDown: boolean) => {
+            const button = keyToButtonMap[event.code];
+            if (button) {
+                controllerState[button] = isKeyDown;
+                invoke('handle_input', { inputData: controllerState });
+            }
+        };
+
+        const handleKeyDown = (event: KeyboardEvent) => handleKeyEvent(event, true);
+        const handleKeyUp = (event: KeyboardEvent) => handleKeyEvent(event, false);
+
+        // イベントリスナーを追加
+        document.addEventListener('keydown', handleKeyDown);
+        document.addEventListener('keyup', handleKeyUp);
+
+        // コンポーネントがアンマウントされるときにイベントリスナーを削除
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+            document.removeEventListener('keyup', handleKeyUp);
+        };
+    }, []);
+
     async function getCpuState() {
         try {
             const state = await invoke<CpuState>("get_cpu_state");

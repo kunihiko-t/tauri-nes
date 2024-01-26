@@ -1,12 +1,16 @@
+use serde::Serialize;
+
+#[derive(Serialize)]
 pub struct Memory {
-    pub ram: [u8; 2048],  // 2KBのRAM
+    pub ram: Vec<u8>,
+// 2KBのRAM
     // その他のメモリ領域（PPUレジスタ、APU/I/Oレジスタ、ROM等）も追加
 }
 
 impl Memory {
     pub(crate) fn new() -> Self {
         Self {
-            ram: [0; 2048],
+            ram: vec![0; 2048],
             // その他の領域の初期化
         }
     }

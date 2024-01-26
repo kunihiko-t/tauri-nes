@@ -7,6 +7,10 @@ use tauri::State;
 
 mod cpu;
 mod ram;
+mod ppu;
+mod apu;
+mod controller;
+mod debugger;
 
 const NES_HEADER_SIZE: usize = 16;
 const PRG_ROM_PAGE_SIZE: usize = 16 * 1024;  // 16KB
@@ -59,13 +63,18 @@ fn get_cpu_state(state: State<'_, cpu::CpuState>) -> Result<cpu::CpuState, Strin
 }
 
 
+#[tauri::command]
+fn handle_input(input_data: controller::InputData) {
+    // 入力データを処理する
+}
+
 fn main() {
     let mut memory = ram::Memory::new();
     let mut cpu = cpu::Cpu6502::new();
     cpu.run(&mut memory);
 
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![send_chr_rom, get_cpu_state])
+        .invoke_handler(tauri::generate_handler![send_chr_rom, get_cpu_state, handle_input])
         .manage(cpu::CpuState::new())
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
