@@ -1,33 +1,34 @@
 import { invoke } from "@tauri-apps/api/tauri";
 import { open } from '@tauri-apps/api/dialog'
-import { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react"; // Import useState and useRef
 import "./App.css";
 
-interface CpuState {
-    accumulator: number;
-    x_register: number;
-    y_register: number;
-    status: number;
-    program_counter: number;
-}
+// Define FrameData type based on Rust struct
+// Ensure this matches the structure returned by the backend
+type FrameData = {
+    pixels: number[]; // Should be Uint8ClampedArray or number[] based on backend return
+    width: number;
+    height: number;
+};
 
 function App() {
-    const [cpuState, setCpuState] = useState<CpuState | null>(null);
+    const [romLoaded, setRomLoaded] = useState(false); // State to track if ROM is loaded
+    const canvasRef = useRef<HTMLCanvasElement>(null); // Ref for the main game screen canvas
+    const animationFrameId = useRef<number | null>(null); // Ref to store animation frame ID
 
+    // キーボードイベントを処理し、Rustのバックエンドに送信する
     useEffect(() => {
-        const intervalId = setInterval(() => {
-            getCpuState();
-        }, 1000); // 1000msごとに状態を更新
-
-        // クリーンアップ関数
-        return () => clearInterval(intervalId);
-    }, []);
-
-
-
-// キーボードイベントを処理し、Rustのバックエンドに送信する
-
-    useEffect(() => {
+        // Define ControllerState inside useEffect or import from a types file
+        type ControllerState = {
+            a_button: boolean;
+            b_button: boolean;
+            start: boolean;
+            select: boolean;
+            up: boolean;
+            down: boolean;
+            left: boolean;
+            right: boolean;
+        };
 
         type KeyToButtonMap = {
             [key: string]: keyof ControllerState;
@@ -41,16 +42,6 @@ function App() {
             'ArrowDown': 'down',
             'ArrowLeft': 'left',
             'ArrowRight': 'right',
-        };
-        type ControllerState = {
-            a_button: boolean;
-            b_button: boolean;
-            start: boolean;
-            select: boolean;
-            up: boolean;
-            down: boolean;
-            left: boolean;
-            right: boolean;
         };
 
         const controllerState: ControllerState = {
@@ -69,7 +60,8 @@ function App() {
             const button = keyToButtonMap[event.code];
             if (button) {
                 controllerState[button] = isKeyDown;
-                invoke('handle_input', { inputData: controllerState });
+                // Use invoke with the correct structure for inputData
+                invoke('handle_input', { inputData: { ...controllerState } }); // Send a copy
             }
         };
 
@@ -87,96 +79,115 @@ function App() {
         };
     }, []);
 
-    async function getCpuState() {
-        try {
-            const state = await invoke<CpuState>("get_cpu_state");
-            setCpuState(state);
-        } catch (error) {
-            console.error('Error getting CPU state:', error);
-        }
-    }
+    // Function to draw frame data onto the main canvas
+    const drawFrame = (frameData: FrameData) => {
+        const canvas = canvasRef.current;
+        if (!canvas || !frameData) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
 
-    function convertChrRomToRgba(chrRomData: Uint8Array, width: number, height: number): Uint8ClampedArray {
-        const rgbaData = new Uint8ClampedArray(width * height * 4);
+        const { pixels, width, height } = frameData;
+        // Canvas dimensions should match the NES resolution
+        canvas.width = width;
+        canvas.height = height;
 
-        for (let tile = 0; tile < chrRomData.length / 16; tile++) {
-            for (let row = 0; row < 8; row++) {
-                for (let col = 0; col < 8; col++) {
-                    // 2つの平面からビットを取得
-                    const plane1 = chrRomData[tile * 16 + row] & (1 << (7 - col));
-                    const plane2 = chrRomData[tile * 16 + row + 8] & (1 << (7 - col));
-                    const paletteIndex = ((plane1 >> (7 - col)) << 1) | (plane2 >> (7 - col));
+        // Create ImageData from the raw pixel data (RGBA)
+        // Use Uint8ClampedArray for ImageData constructor
+        const imageData = new ImageData(new Uint8ClampedArray(pixels), width, height);
 
-                    // グレースケールカラーを適用（ここでは仮のパレットとして）
-                    const color = paletteIndex * 85; // 0, 85, 170, 255
+        // Draw the ImageData onto the canvas
+        ctx.putImageData(imageData, 0, 0);
+    };
 
-                    // ピクセル位置を計算
-                    const x = (tile % 16) * 8 + col;
-                    const y = (tile / 16 | 0) * 8 + row;
-
-                    // RGBAデータを設定
-                    const dataIndex = (y * width + x) * 4;
-                    rgbaData[dataIndex] = color; // R
-                    rgbaData[dataIndex + 1] = color; // G
-                    rgbaData[dataIndex + 2] = color; // B
-                    rgbaData[dataIndex + 3] = 255;   // A
-                }
+    // Main emulation loop using requestAnimationFrame
+    const runEmulatorLoop = async () => {
+        // Only run the loop logic if a ROM is loaded
+        if (romLoaded) {
+            try {
+                // Fetch the frame data from the backend
+                const frameData: FrameData = await invoke('run_emulator_frame');
+                // Draw the received frame onto the canvas
+                drawFrame(frameData);
+            } catch (error) {
+                console.error('Error running emulator frame:', error);
+                // Consider stopping the loop or showing an error message
+                setRomLoaded(false); // Stop the loop if backend error occurs
             }
         }
 
-        return rgbaData;
-    }
+        // Request the next animation frame to continue the loop
+        animationFrameId.current = requestAnimationFrame(runEmulatorLoop);
+    };
+
+    // Effect to start and stop the emulation loop
+    useEffect(() => {
+        // Start the loop when the component mounts
+        animationFrameId.current = requestAnimationFrame(runEmulatorLoop);
+
+        // Cleanup function to cancel the animation frame when the component unmounts
+        return () => {
+            if (animationFrameId.current) {
+                cancelAnimationFrame(animationFrameId.current);
+            }
+        };
+    }, [romLoaded]); // Dependency array includes romLoaded to restart loop logic if it changes
+
+    // Removed convertChrRomToRgba function
+    /*
+    function convertChrRomToRgba(...) { ... }
+    */
+
     async function openDialog() {
-        const filePath = await open();
-        console.log(filePath);
+        const selected = await open({
+            multiple: false,
+            filters: [{ name: 'NES ROM', extensions: ['nes'] }]
+        });
 
-        try {
-            const buffer: ArrayBuffer = await invoke<ArrayBuffer>("send_chr_rom", { filePath });
-            const chrRomData = new Uint8Array(buffer);
-            drawChrRom(chrRomData);
-        } catch (error) {
-            console.error('Error loading CHR ROM:', error);
+        if (typeof selected === 'string') { // Check if a file was selected
+            const filePath = selected;
+            console.log("Selected file path:", filePath);
+            try {
+                // Call the correct command to load the ROM
+                await invoke('load_rom', { filePath });
+                console.log('ROM loaded successfully via dialog');
+                setRomLoaded(true); // Update state to indicate ROM is loaded
+            } catch (error) {
+                console.error('Error invoking load_rom:', error);
+                setRomLoaded(false); // Update state on error
+                // TODO: Display error message to the user
+            }
+        } else {
+            console.log("File selection cancelled.");
+            setRomLoaded(false); // Ensure state reflects no ROM loaded
         }
     }
 
-    function drawChrRom(chrRomData: Uint8Array) {
-        // HTMLのCanvas要素を取得
-        const canvas = document.getElementById('chrCanvas') as HTMLCanvasElement;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) {
-            throw new Error("Could not get canvas context");
-        }
-        // Canvasのサイズを適切に設定する（タイルの数に基づく）
-        canvas.width = 128; // 16タイル分の幅
-        canvas.height = (chrRomData.length / 16) * 8 / 16; // CHR ROMのタイル数に基づいた高さ
-
-        // CHR ROMデータを解析してRGBAデータに変換する
-        const rgbaData = convertChrRomToRgba(chrRomData, canvas.width, canvas.height);
-
-        // ImageDataオブジェクトの作成
-        const imageData = new ImageData(rgbaData, canvas.width, canvas.height);
-
-        // Canvasに画像を描画
-        ctx.putImageData(imageData, 0, 0);
-    }
-
-
+    // Removed drawChrRom function
+    /*
+    function drawChrRom(...) { ... }
+    */
 
   return (
       <div className="container">
           <h1>Tauri NES</h1>
-          {/* CPUの状態を表示 */}
-          {cpuState && (
-              <div className="cpu-state">
-                  <p>Accumulator: {cpuState.accumulator.toString(16)}</p>
-                  <p>X Register: {cpuState.x_register.toString(16)}</p>
-                  <p>Y Register: {cpuState.y_register.toString(16)}</p>
-                  <p>Status: {cpuState.status.toString(16)}</p>
-                  <p>Program Counter: {cpuState.program_counter.toString(16)}</p>
-              </div>
-          )}
-          <button onClick={openDialog}>Click to open NES rom</button>
-          <canvas id="chrCanvas"></canvas>
+          <button onClick={openDialog}>Load NES ROM</button>
+
+          {/* Main Game Screen Canvas */}
+          <div className="emulator-screen" style={{ marginTop: '10px' }}>
+                <canvas
+                    ref={canvasRef}
+                    style={{
+                        border: '1px solid black',
+                        imageRendering: 'pixelated', // Keep pixels sharp when scaled
+                        width: '512px', // Scale canvas for display (2x width)
+                        height: '480px' // Scale canvas for display (2x height)
+                    }}
+                ></canvas>
+                {!romLoaded && <p style={{ textAlign: 'center', marginTop: '5px' }}>Please load a .nes ROM file.</p>}
+            </div>
+
+          {/* Removed CHR ROM Canvas */}
+          {/* <canvas id="chrCanvas" ... ></canvas> */}
       </div>
   );
 }
