@@ -76,7 +76,7 @@ pub struct Ppu {
     // Palette RAM (32 bytes)
     pub palette_ram: [u8; 32],
 
-    pub vram: [u8; 2048],         // Nametable RAM (2KB)
+    pub vram: Vec<u8>,         // Nametable RAM (2KB)
     pub frame_complete: bool,
     pub chr_ram: Vec<u8>, // CHR RAM for testing
     pub write_latch: bool,           // Loopy's w register
@@ -90,6 +90,8 @@ pub struct Ppu {
     bg_shifter_pattern_hi: u16,
     bg_shifter_attrib_lo: u16,
     bg_shifter_attrib_hi: u16,
+    // アニメーション用フレームカウンタを追加
+    pub frame_counter: u32,
 }
 
 impl Ppu {
@@ -110,7 +112,7 @@ impl Ppu {
             data_buffer: 0,
             oam_data: [0; 256],
             palette_ram: [0; 32],
-            vram: [0; 2048],
+            vram: vec![0; 2048],
             frame_complete: false,
             chr_ram: vec![0; 8192], // Remove if using Cartridge CHR directly
             write_latch: false,
@@ -124,6 +126,7 @@ impl Ppu {
             bg_shifter_pattern_hi: 0,
             bg_shifter_attrib_lo: 0,
             bg_shifter_attrib_hi: 0,
+            frame_counter: 0,
         };
         
         // パレットの初期化 - NESの標準パレットに近い色を設定
@@ -210,6 +213,7 @@ impl Ppu {
         self.fine_x_scroll = 0;
         self.data_buffer = 0;
         self.oam_addr = 0;
+        self.frame_counter = 0;
 
         // PPUレジスタをリセット
         self.status.register = 0x00;
@@ -225,22 +229,40 @@ impl Ppu {
             self.frame.pixels[i] = 0;
         }
         
-        // PPUパレットを初期化
-        for i in 0..32 {
-            self.palette_ram[i] = 0;
-        }
-        
-        // デフォルトパレットを設定（基本的な色）
+        // PPUパレットを初期化 - 青系の色のセット
         self.palette_ram[0] = 0x0F; // 背景色 (黒)
-        self.palette_ram[1] = 0x30; // 青
-        self.palette_ram[2] = 0x16; // 緑
-        self.palette_ram[3] = 0x2A; // 赤
+        
+        // パレット1（青系）
+        self.palette_ram[1] = 0x01; // ダークブルー
+        self.palette_ram[2] = 0x11; // ミディアムブルー 
+        self.palette_ram[3] = 0x21; // ライトブルー
+        
+        // パレット2（水色系）
+        self.palette_ram[5] = 0x0C; // ダーク水色
+        self.palette_ram[6] = 0x1C; // ミディアム水色
+        self.palette_ram[7] = 0x2C; // ライト水色
+        
+        // パレット3（紫系）
+        self.palette_ram[9] = 0x13; // ダーク紫
+        self.palette_ram[10] = 0x23; // ミディアム紫
+        self.palette_ram[11] = 0x33; // ライト紫
+        
+        // パレット4（シアン系）
+        self.palette_ram[13] = 0x1A; // ダークシアン
+        self.palette_ram[14] = 0x2A; // ミディアムシアン
+        self.palette_ram[15] = 0x3A; // ライトシアン
+        
+        // ミラーリングの処理
+        self.palette_ram[0x10] = self.palette_ram[0];
+        self.palette_ram[0x14] = self.palette_ram[0x04];
+        self.palette_ram[0x18] = self.palette_ram[0x08];
+        self.palette_ram[0x1C] = self.palette_ram[0x0C];
         
         // 初期状態のフラグを設定
         self.ctrl.set_bits(0x90);  // NMI有効化など
         self.mask.set_bits(0x1E);  // 背景とスプライトを有効化
         
-        println!("PPU Reset complete");
+        println!("PPU Reset complete - Blue color scheme initialized");
     }
 
     // Simulate PPU stepping by ONE PPU cycle
@@ -253,6 +275,14 @@ impl Ppu {
         if current_scanline == 241 && current_cycle == 1 {
             self.status.set_vblank_started(true);
             self.frame_complete = true; // Signal frame ready
+            
+            // フレームが完了したらフレームカウンタをインクリメント
+            self.frame_counter = self.frame_counter.wrapping_add(1);
+            
+            // 100フレームごとにデバッグ出力
+            if self.frame_counter % 100 == 0 {
+                println!("PPU Frame: {}", self.frame_counter);
+            }
         }
         if current_scanline == 261 && current_cycle == 1 { // Pre-render line start
             self.status.set_vblank_started(false);
@@ -270,19 +300,109 @@ impl Ppu {
             let y = current_scanline as usize;
             
             if rendering_enabled {
-                // シンプルなテストパターンを描画
-                // 画面全体を格子状のパターンにして、位置が分かりやすいようにする
-                let pattern_x = (x / 16) % 2;
-                let pattern_y = (y / 16) % 2;
+                // --- リッチアニメーションシステム ---
                 
-                // 格子パターンを作成
-                let idx = (pattern_x + pattern_y) % 2;
+                // ベースとなる時間ファクター
+                let main_time = self.frame_counter as f32 * 0.02;
+                let slow_time = self.frame_counter as f32 * 0.01;
+                let fast_time = self.frame_counter as f32 * 0.04;
                 
-                // カラーパレットから色を選択
-                let color_value = if idx == 0 { 0x29 } else { 0x19 }; // 明るめの色と暗めの色
+                // 画面位置の正規化座標 (0.0 〜 1.0)
+                let nx = x as f32 / SCREEN_WIDTH as f32;
+                let ny = y as f32 / SCREEN_HEIGHT as f32;
                 
-                // NESパレットから実際のRGB値を取得
-                let (r, g, b) = NES_PALETTE[color_value as usize & 0x3F];
+                // 画面中心からの距離
+                let cx = nx - 0.5;
+                let cy = ny - 0.5;
+                let dist_center = (cx * cx + cy * cy).sqrt();
+                
+                // 複数のアニメーションパターン生成
+                
+                // 1. モザイクパターン (大きさが時間とともに変化)
+                let mosaic_size = 4.0 + (main_time.sin() * 0.5 + 0.5) * 20.0;
+                let mosaic_x = (x as f32 / mosaic_size).floor() as i32;
+                let mosaic_y = (y as f32 / mosaic_size).floor() as i32;
+                let mosaic = (mosaic_x + mosaic_y) % 2 == 0;
+                
+                // 2. 同心円パターン (中心から広がる波)
+                let circle_speed = 1.0 + (slow_time.cos() * 0.5 + 0.5) * 3.0;
+                let circle_phase = (dist_center * 10.0 - main_time * circle_speed) % 1.0;
+                let circle = circle_phase > 0.5;
+                
+                // 3. 螺旋パターン
+                let angle = ny.atan2(nx) * 3.0;
+                let spiral = ((angle + main_time) % 1.0) > 0.5;
+                
+                // 4. 交差する波パターン
+                let wave_x = (nx * 10.0 + main_time).sin();
+                let wave_y = (ny * 10.0 + main_time * 0.7).cos();
+                let waves = (wave_x * wave_y) > 0.0;
+                
+                // 5. 複合パターン - 時間によって変化
+                let time_segment = ((self.frame_counter / 180) % 4) as usize;
+                let pattern = match time_segment {
+                    0 => mosaic as usize,
+                    1 => circle as usize,
+                    2 => spiral as usize,
+                    _ => waves as usize,
+                };
+                
+                // 色パレットセット（時間で循環）
+                let color_sets = [
+                    // 青と水色のセット
+                    [0x01, 0x11, 0x21, 0x31, 0x0C, 0x1C, 0x2C, 0x3C],
+                    // 緑と黄緑のセット
+                    [0x09, 0x19, 0x29, 0x39, 0x0A, 0x1A, 0x2A, 0x3A],
+                    // 紫とピンクのセット
+                    [0x04, 0x14, 0x24, 0x34, 0x05, 0x15, 0x25, 0x35],
+                    // 赤とオレンジのセット
+                    [0x06, 0x16, 0x26, 0x36, 0x07, 0x17, 0x27, 0x37],
+                ];
+                
+                // カラーセットの選択（90秒ごとに変更）
+                let color_set_index = ((self.frame_counter / (60 * 90)) % color_sets.len() as u32) as usize;
+                let colors = &color_sets[color_set_index];
+                
+                // 明暗の選択と色相シフトを時間で変化
+                let hue_shift = ((main_time * 0.5).sin() * 0.5 + 0.5) * 4.0;
+                let shade_index = (hue_shift as usize) % 4;
+                
+                // パターンに基づく色の選択
+                let color_index = match pattern {
+                    1 => colors[shade_index],          // 明るい色
+                    _ => colors[4 + (shade_index % 4)], // 暗い色
+                };
+                
+                // 特殊効果 - フラッシュと暗転
+                let special_effect = match self.frame_counter % 600 {
+                    597..=599 => true, // 暗転効果
+                    298..=300 => true, // 中間フラッシュ
+                    _ => false,
+                };
+                
+                // 時々画面の一部に波紋エフェクト
+                let ripple_effect = self.frame_counter % 300 >= 150 && self.frame_counter % 300 < 180;
+                let ripple_intensity = if ripple_effect {
+                    let t = (self.frame_counter % 300 - 150) as f32 / 30.0;
+                    let phase = t * std::f32::consts::PI * 2.0;
+                    let ripple_distance = (dist_center * 20.0 - fast_time * 5.0).sin() * 0.5 + 0.5;
+                    (phase.sin() * ripple_distance) * 0.7 + 0.3
+                } else {
+                    1.0
+                };
+                
+                // 最終的な色の決定
+                let final_color = if special_effect {
+                    0x0F // 黒色
+                } else if ripple_effect && ripple_intensity < 0.5 {
+                    // 波紋の暗い部分
+                    0x0F
+                } else {
+                    color_index
+                };
+                
+                // NESパレットからRGB値を取得
+                let (r, g, b) = NES_PALETTE[final_color as usize & 0x3F];
                 
                 // フレームバッファに書き込み
                 let frame_idx = (y * SCREEN_WIDTH + x) * 4;
@@ -295,20 +415,20 @@ impl Ppu {
             }
         }
 
+        // --- PPU timing simulation ---
+        self.cycle += 1;
+        if self.cycle > 340 { // End of scanline
+            self.cycle = 0;
+            self.scanline += 1;
+            
+            if self.scanline > 261 { // End of frame
+                self.scanline = 0;
+            }
+        }
+        
         // --- NMI Line Update --- 
         let nmi_asserted = self.status.vblank_started() && self.ctrl.generate_nmi();
         self.nmi_line_low = !nmi_asserted; // Line is low (active) when asserted
-
-        // --- Advance Timers --- 
-        self.cycle += 1;
-        if self.cycle > 340 { // Max cycle is 340
-            self.cycle = 0;
-            self.scanline += 1;
-            if self.scanline > 261 { // Max scanline is 261 (pre-render)
-                self.scanline = 0; // Wrap scanline
-                self.frame_complete = true; // フレーム完了を設定
-            }
-        }
     }
 
     // Placeholder for PPU reads - Replace with Bus calls eventually

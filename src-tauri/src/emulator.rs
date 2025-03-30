@@ -80,69 +80,43 @@ impl Emulator {
     }
 
     // Runs the emulator for approximately one frame
-    pub fn run_frame(&mut self) -> FrameData { // Return FrameData
-        // Rough target cycles per frame (adjust as needed)
-        // NTSC NES CPU runs at ~1.79 MHz, PPU at ~5.37 MHz (3x CPU)
-        // Frame rate is ~60 Hz
-        // CPU Cycles per frame = 1,789,773 / 60 ~= 29830
-        const TARGET_CPU_CYCLES_PER_FRAME: u64 = 29830;
-        
+    pub fn run_frame(&mut self) -> u32 {
+        // 1フレーム分のサイクルを実行
+        let mut cycles_this_frame = 0u32;
+
+        // 実行前のサイクル数を記録
         let start_cycles = self.bus.total_cycles;
-        let target_end_cycles = start_cycles.wrapping_add(TARGET_CPU_CYCLES_PER_FRAME);
-
-        // PPUレンダリングを有効化（マスクレジスタを設定）
-        // PPUが有効でないとレンダリング処理が行われない
-        self.bus.write_ppu_mask(0x1E); // 背景とスプライトを表示 (0x1E = 0b00011110)
-        
-        // 各フレームの開始をログに記録
-        println!("Starting new frame at cycle: {}", start_cycles);
-
-        // 目標サイクル数に達するまでクロック、またはフレーム完了まで
-        // Bus のクロック処理がPPUのステップを行い、frame_completeを設定する
-        let mut loop_count = 0;
-        let max_loops = 100000; // 無限ループ防止
-        
-        // 条件の書き方を変更して、オーバーフローを考慮
-        while loop_count < max_loops {
-            if self.bus.is_frame_complete() {
-                break;
-            }
-            
-            // 目標サイクル数に達したかチェック（オーバーフロー考慮）
-            let current_cycles = self.bus.total_cycles;
-            if current_cycles.wrapping_sub(start_cycles) >= TARGET_CPU_CYCLES_PER_FRAME {
-                break;
-            }
-            
-            // Busのclockメソッドを呼び出し、CPUとPPUの処理を任せる
-            let cycles = self.bus.clock();
-            
-            // 実行サイクル数をログ出力（デバッグ用）
-            if loop_count % 1000 == 0 {
-                println!("CPU executed {} cycles, total: {}", cycles, self.bus.total_cycles);
-            }
-            
-            loop_count += 1;
-        }
-        
-        if loop_count >= max_loops {
-            println!("WARNING: Maximum loop count reached, frame may not be complete");
-        }
-        
-        println!("Frame complete at cycle: {}, cycles executed: {}", 
-            self.bus.total_cycles, self.bus.total_cycles.wrapping_sub(start_cycles));
-
-        // バス側PPUのフレームをコピー
-        let frame_data = self.bus.get_ppu_frame();
-        
-        // Emulator内蔵のPPUのフレームをバスからコピー（後で参照用）
-        self.ppu.frame = frame_data.clone();
         
         // フレーム完了フラグをリセット
         self.bus.reset_frame_complete();
+        
+        // フレームが完了するまでCPUサイクルを実行
+        loop {
+            // CPUクロックを実行
+            let cycles = self.bus.clock();
+            
+            // サイクルカウンタを更新（オーバーフローを防止するためwrapping_addを使用）
+            cycles_this_frame = cycles_this_frame.wrapping_add(cycles as u32);
+            
+            // フレーム完了チェック
+            if self.bus.is_frame_complete() {
+                // フレーム完了フラグをリセット
+                self.bus.reset_frame_complete();
+                break;
+            }
+            
+            // 安全装置：過剰なサイクル数でループを抜ける（オーバーフロー対策）
+            if cycles_this_frame > 100_000 {
+                println!("WARNING: Safety break - excessive cycles: {}", cycles_this_frame);
+                break;
+            }
+        }
 
-        // Return the rendered frame data
-        frame_data
+        // 合計サイクル数を計算（オーバーフロー対策のためwrapping_sub使用）
+        let total_executed = self.bus.total_cycles.wrapping_sub(start_cycles) as u32;
+        println!("Frame complete at cycle: {}, cycles executed: {}", self.bus.total_cycles, total_executed);
+        
+        total_executed
     }
 
      // TODO: Implement handle_input method
