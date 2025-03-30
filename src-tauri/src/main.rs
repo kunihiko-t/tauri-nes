@@ -8,6 +8,7 @@ use tauri::State; // Added back for managed state
 use crate::emulator::Emulator;
 use crate::ppu::FrameData; // Import FrameData directly from ppu module
 use crate::cpu::InspectState;  // InspectState構造体をインポート
+use serde::Serialize;
 
 mod cpu;
 mod ram;
@@ -18,6 +19,7 @@ mod ppu;
 mod apu;
 mod controller;
 mod debugger;
+mod registers;
 
 const NES_HEADER_SIZE: usize = 16;
 const PRG_ROM_PAGE_SIZE: usize = 16 * 1024;  // 16KB
@@ -125,6 +127,13 @@ impl NesRom {
     // Removed get_chr_rom as data is accessed directly or via Cartridge
 }
 
+// Define a struct to combine CPU state and PPU frame for frontend
+#[derive(Serialize, Clone)]
+struct FullStateInfo {
+    cpu: InspectState,
+    ppu_frame: FrameData,
+}
+
 // Command to load ROM into the emulator
 #[tauri::command]
 fn load_rom(
@@ -161,9 +170,18 @@ fn run_emulator_frame(state: State<'_, Arc<Mutex<Emulator>>>) -> Result<FrameDat
 }
 
 #[tauri::command]
-fn get_cpu_state(state: tauri::State<Mutex<Emulator>>) -> InspectState {
-    let emulator = state.lock().unwrap();
-    emulator.inspect_cpu()
+fn get_cpu_state(state: tauri::State<Arc<Mutex<Emulator>>>) -> Result<InspectState, String> {
+    let emulator = state.lock().map_err(|e| e.to_string())?;
+    // Access methods via emulator.bus
+    let cpu_state = emulator.bus.get_cpu_state();
+    // Remove unnecessary accesses to regs and pc within this function
+    // let regs = cpu_state.registers;
+    // let pc = regs.program_counter;
+
+    // PPU Frame Data (not needed for this specific function, remove if unused)
+    // let frame_data = emulator.bus.get_ppu_frame();
+
+    Ok(cpu_state) // Return the fetched cpu_state
 }
 
 // メモリデバッグコマンドを追加
@@ -204,12 +222,24 @@ fn debug_stack(state: tauri::State<'_, Arc<Mutex<Emulator>>>) {
 }
 
 #[tauri::command]
-fn debug_current_code(state: tauri::State<'_, Arc<Mutex<Emulator>>>, num_instructions: u16) {
-    if let Ok(emulator) = state.lock() {
-        let cpu_state = emulator.inspect_cpu();
-        let pc = cpu_state.program_counter;
-        emulator.debug_disassemble(pc, num_instructions);
-    }
+fn get_state_info(state: tauri::State<Arc<Mutex<Emulator>>>) -> Result<FullStateInfo, String> {
+    let emulator_mutex = state.lock().map_err(|e| e.to_string())?;
+    let cpu_state = emulator_mutex.bus.get_cpu_state(); // Access via emulator_mutex.bus
+    let frame_data = emulator_mutex.bus.get_ppu_frame(); // Access via emulator_mutex.bus
+
+    Ok(FullStateInfo {
+        cpu: cpu_state,
+        ppu_frame: frame_data,
+    })
+}
+
+#[tauri::command]
+fn debug_current_code(state: tauri::State<Arc<Mutex<Emulator>>>, num_instructions: u16) -> Result<(), String> {
+    let emulator_mutex = state.lock().map_err(|e| e.to_string())?;
+    let cpu_state = emulator_mutex.bus.get_cpu_state(); // Access via emulator_mutex.bus
+    let pc = cpu_state.registers.program_counter;
+    emulator_mutex.bus.debug_disassemble(pc, num_instructions); // Access via emulator_mutex.bus
+    Ok(())
 }
 
 #[tauri::command]
@@ -238,6 +268,7 @@ fn main() {
             debug_disassemble,
             debug_zero_page,
             debug_stack,
+            get_state_info,
             debug_current_code,
             monitor_address
         ])

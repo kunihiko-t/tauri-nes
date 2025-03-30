@@ -18,23 +18,73 @@ struct Mapper0 {
     prg_banks: u8,
     chr_banks: u8,
     prg_rom: Vec<u8>,
-    chr_rom: Vec<u8>, // Might be CHR RAM for some NROM carts
+    chr_rom: Vec<u8>, // Used if chr_banks > 0
+    chr_ram: Vec<u8>, // Added for CHR RAM support (8KB)
     mirroring: Mirroring,
 }
 
 impl Mapper for Mapper0 {
     fn read_prg(&self, addr: u16) -> u8 {
-        // NROM maps $8000-$BFFF to first 16KB bank
-        // and $C000-$FFFF to the last 16KB bank (or mirror of first if only 1 bank)
-        let mut mapped_addr = addr as usize - 0x8000;
-        if self.prg_banks == 1 && mapped_addr >= 0x4000 {
-            // Mirror the first 16KB bank if only one exists
-            mapped_addr %= 0x4000;
+        // PRGメモリは0x8000-0xFFFFの範囲にマッピングされるべき
+        if addr < 0x8000 {
+            // 一部のゲームは低アドレス領域も使用することがある
+            // 警告を出さずに0を返す
+            return 0;
         }
-        self.prg_rom.get(mapped_addr).copied().unwrap_or_else(|| {
-             eprintln!("WARN: Read out of bounds PRG ROM access at {:04X} (mapped: {:04X})", addr, mapped_addr);
-             0
-        })
+
+        // 特別なケース: ベクタアドレスのアクセス時にデバッグログを出力
+        if addr >= 0xFFFA && addr <= 0xFFFF {
+            // NROM maps $8000-$BFFF to first 16KB bank
+            // and $C000-$FFFF to the last 16KB bank (or mirror of first if only 1 bank)
+            let mapped_addr = if self.prg_banks == 1 {
+                // 16KBバンクが1つしかない場合: すべてをミラーリング
+                ((addr - 0x8000) % 0x4000) as usize
+            } else { 
+                // 32KBバンクの場合: 直接マッピング
+                (addr - 0x8000) as usize
+            };
+            
+            if mapped_addr < self.prg_rom.len() {
+                let value = self.prg_rom[mapped_addr];
+                
+                // デバッグログを出力
+                match addr {
+                    0xFFFA | 0xFFFB => {
+                        println!("NMI vector read at ${:04X}: ${:02X} (ROM addr: ${:04X})", 
+                            addr, value, mapped_addr);
+                    },
+                    0xFFFC | 0xFFFD => {
+                        println!("Reset vector read at ${:04X}: ${:02X} (ROM addr: ${:04X})", 
+                            addr, value, mapped_addr);
+                    },
+                    0xFFFE | 0xFFFF => {
+                        println!("IRQ vector read at ${:04X}: ${:02X} (ROM addr: ${:04X})", 
+                            addr, value, mapped_addr);
+                    },
+                    _ => {}
+                }
+                
+                return value;
+            } else {
+                return 0;
+            }
+        }
+
+        // 通常のアクセス処理（ベクタアドレス以外）
+        let mapped_addr = if self.prg_banks == 1 {
+            // 16KBバンクが1つしかない場合: すべてをミラーリング
+            ((addr - 0x8000) % 0x4000) as usize
+        } else { 
+            // 32KBバンクの場合: 直接マッピング
+            (addr - 0x8000) as usize
+        };
+        
+        // アドレスが範囲内かチェック
+        if mapped_addr < self.prg_rom.len() {
+            self.prg_rom[mapped_addr]
+        } else {
+            0
+        }
     }
 
     fn write_prg(&mut self, addr: u16, data: u8) {
@@ -43,13 +93,19 @@ impl Mapper for Mapper0 {
     }
 
     fn read_chr(&self, addr: u16) -> u8 {
+        let addr = addr & 0x1FFF; // Ensure address is within 8KB range
         if self.chr_banks == 0 {
-             // CHR RAMの場合
-             // 実装されていない場合、0を返す（将来的にCHR RAMとして実装）
-             return 0;
+            // CHR RAM read
+            if (addr as usize) < self.chr_ram.len() {
+                self.chr_ram[addr as usize]
+            } else {
+                 eprintln!("WARN: Read out of bounds CHR RAM access at {:04X}", addr);
+                0
+            }
          } else {
+             // CHR ROM read
              // 常にアドレス範囲を安全に処理する
-             let addr = addr & 0x1FFF; // 8KB空間に制限
+             // let addr = addr & 0x1FFF; // Already done above
              if (addr as usize) < self.chr_rom.len() {
                  self.chr_rom[addr as usize]
              } else {
@@ -64,9 +120,19 @@ impl Mapper for Mapper0 {
     }
 
     fn write_chr(&mut self, addr: u16, data: u8) {
+        let addr = addr & 0x1FFF; // Ensure address is within 8KB range
         if self.chr_banks == 0 {
-            // Write to CHR RAM - TODO: Implement CHR RAM if needed
-             eprintln!("WARN: Attempted CHR write to CHR RAM (Mapper 0) - not implemented yet. Addr: {:04X}, Data: {:02X}", addr, data);
+            // CHR RAM write
+            if (addr as usize) < self.chr_ram.len() {
+                // ★★★ CHR RAM 書き込みログ ★★★
+                if addr < 0x10 || (addr >= 0x1000 && addr < 0x1010) { // Limit output
+                    println!("--- CHR RAM Write: Addr:{:04X} Data:{:02X} ---", addr, data);
+                }
+                // ★★★ ここまで ★★★
+                self.chr_ram[addr as usize] = data;
+            } else {
+                 eprintln!("WARN: Write out of bounds CHR RAM access at {:04X}", addr);
+            }
         } else {
             // CHR ROM is generally not writable
              eprintln!("WARN: Attempted write to CHR ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
@@ -112,12 +178,19 @@ impl Cartridge {
         let mapper: Box<dyn Mapper> = match mapper_id {
             0 => {
                 // Create Mapper 0 instance
-                 let chr_data = if chr_banks == 0 { Vec::new() } else { chr_rom }; // Handle CHR RAM case later maybe
+                let mut chr_ram = vec![0u8; 0]; // Initialize as empty
+                if chr_banks == 0 {
+                     println!("Mapper 0: Using 8KB CHR RAM");
+                    chr_ram = vec![0u8; 8192]; // Allocate 8KB if no CHR ROM
+                }
+                let chr_data = if chr_banks == 0 { Vec::new() } else { chr_rom }; // Pass empty Vec if CHR RAM
+
                 Box::new(Mapper0 {
                     prg_banks,
                     chr_banks,
                     prg_rom,
                     chr_rom: chr_data,
+                    chr_ram, // Add chr_ram field
                     mirroring,
                 })
             }

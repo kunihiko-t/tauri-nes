@@ -3,39 +3,37 @@ use crate::bus::Bus;
 use crate::cartridge::Cartridge;
 use crate::NesRom;
 use crate::ppu::{FrameData, Ppu};
-// use std::fs; // Removed unused import
+// use std::sync::{Arc, Mutex}; // Removed unused import
 // use std::path::Path; // Removed unused import
 // TODO: Add other necessary components like PPU, APU, Cartridge
 
 pub struct Emulator {
     cpu: Cpu6502,
-    bus: Bus,
+    pub bus: Bus,
     ppu: Ppu,
     // apu: Apu,
     // cartridge: Option<Cartridge>, // Removed, Bus owns the cartridge now
     cycles_this_frame: u64,
+    is_running: bool,
+    // rom_path: Option<String>, // Keep track of loaded ROM path if needed
     // Add other state like running status, frame count etc.
 }
 
 impl Emulator {
     pub fn new() -> Self {
-        let bus = Bus::new();
+        // まずCPUとPPUを初期化します（Bus内のものとは別に）
         let cpu = Cpu6502::new();
         let ppu = Ppu::new();
-
-        // Reset the CPU. This reads the reset vector (0xFFFC) from the bus
-        // to set the initial program counter. The bus needs to be mutable
-        // here if reset involves writes (e.g., initializing PPU/APU registers),
-        // but Cpu6502::reset currently only reads.
-        // CPU reset will happen after loading ROM
-        // cpu.reset(&mut bus); // Pass bus to reset
+        
+        // 次にBusを初期化（Bus内部でも別のCPUとPPUインスタンスが作成される）
+        let bus = Bus::new();
 
         Emulator {
-            cpu,
-            bus,
-            ppu,
-            // cartridge: None, // Removed
+            cpu,           // 外部CPUインスタンス
+            bus,           // メインBus
+            ppu,           // 外部PPUインスタンス
             cycles_this_frame: 0,
+            is_running: true,
         }
     }
 
@@ -74,7 +72,8 @@ impl Emulator {
 
         // 5. Reset CPU to apply changes and read reset vector from cartridge
         self.cpu.reset(&mut self.bus);
-        println!("CPU reset. PC starting at: {:#04X}", self.cpu.inspect().program_counter);
+        // Correct program_counter access
+        println!("CPU reset. PC starting at: {:#04X}", self.cpu.inspect().registers.program_counter);
 
         println!("ROM '{}' loaded successfully.", file_path);
         Ok(())
@@ -87,24 +86,63 @@ impl Emulator {
         // Frame rate is ~60 Hz
         // CPU Cycles per frame = 1,789,773 / 60 ~= 29830
         const TARGET_CPU_CYCLES_PER_FRAME: u64 = 29830;
-
+        
         let start_cycles = self.bus.total_cycles;
-        let target_end_cycles = start_cycles + TARGET_CPU_CYCLES_PER_FRAME;
+        let target_end_cycles = start_cycles.wrapping_add(TARGET_CPU_CYCLES_PER_FRAME);
 
+        // PPUレンダリングを有効化（マスクレジスタを設定）
+        // PPUが有効でないとレンダリング処理が行われない
+        self.bus.write_ppu_mask(0x1E); // 背景とスプライトを表示 (0x1E = 0b00011110)
+        
         // 各フレームの開始をログに記録
         println!("Starting new frame at cycle: {}", start_cycles);
 
-        // 目標サイクル数に達するまでクロック
-        while self.bus.total_cycles < target_end_cycles {
+        // 目標サイクル数に達するまでクロック、またはフレーム完了まで
+        // Bus のクロック処理がPPUのステップを行い、frame_completeを設定する
+        let mut loop_count = 0;
+        let max_loops = 100000; // 無限ループ防止
+        
+        // 条件の書き方を変更して、オーバーフローを考慮
+        while loop_count < max_loops {
+            if self.bus.is_frame_complete() {
+                break;
+            }
+            
+            // 目標サイクル数に達したかチェック（オーバーフロー考慮）
+            let current_cycles = self.bus.total_cycles;
+            if current_cycles.wrapping_sub(start_cycles) >= TARGET_CPU_CYCLES_PER_FRAME {
+                break;
+            }
+            
             // Busのclockメソッドを呼び出し、CPUとPPUの処理を任せる
-            self.bus.clock();
+            let cycles = self.bus.clock();
+            
+            // 実行サイクル数をログ出力（デバッグ用）
+            if loop_count % 1000 == 0 {
+                println!("CPU executed {} cycles, total: {}", cycles, self.bus.total_cycles);
+            }
+            
+            loop_count += 1;
         }
-
+        
+        if loop_count >= max_loops {
+            println!("WARNING: Maximum loop count reached, frame may not be complete");
+        }
+        
         println!("Frame complete at cycle: {}, cycles executed: {}", 
-            self.bus.total_cycles, self.bus.total_cycles - start_cycles);
+            self.bus.total_cycles, self.bus.total_cycles.wrapping_sub(start_cycles));
+
+        // バス側PPUのフレームをコピー
+        let frame_data = self.bus.get_ppu_frame();
+        
+        // Emulator内蔵のPPUのフレームをバスからコピー（後で参照用）
+        self.ppu.frame = frame_data.clone();
+        
+        // フレーム完了フラグをリセット
+        self.bus.reset_frame_complete();
 
         // Return the rendered frame data
-        self.ppu.get_frame()
+        frame_data
     }
 
      // TODO: Implement handle_input method
@@ -141,6 +179,13 @@ impl Emulator {
 
     pub fn debug_disassemble(&self, start_addr: u16, num_instructions: u16) {
         self.bus.debug_disassemble(start_addr, num_instructions)
+    }
+
+    // Call the CPU's reset method via the Bus
+    pub fn reset(&mut self) {
+        self.bus.reset(); // Reset through the bus
+        // Accessing PC needs adjustment due to InspectState structure change
+        println!("CPU reset. PC starting at: {:#04X}", self.bus.get_cpu_state().registers.program_counter);
     }
 }
 
