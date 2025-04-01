@@ -21,6 +21,9 @@ struct Mapper0 {
     chr_rom: Vec<u8>, // Used if chr_banks > 0
     chr_ram: Vec<u8>, // Added for CHR RAM support (8KB)
     mirroring: Mirroring,
+    // BG切り替えスイッチ対応
+    bg_switch_enabled: bool,
+    bg_bank_selected: u8,
 }
 
 impl Mapper for Mapper0 {
@@ -88,35 +91,64 @@ impl Mapper for Mapper0 {
     }
 
     fn write_prg(&mut self, addr: u16, data: u8) {
-        // Generally, PRG ROM is not writable for Mapper 0
-         eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+        // マッパー0は通常PRG ROMに書き込めないが、特殊な機能を追加
+        // BG切り替えスイッチ機能の実装
+        if addr >= 0x8000 && addr <= 0x8FFF {
+            // $8000-$8FFFへの書き込みを特殊なマッパーレジスタとして扱う
+            if data & 0x80 != 0 {
+                // BG切り替えスイッチ有効化
+                self.bg_switch_enabled = true;
+                self.bg_bank_selected = data & 0x03; // 下位2ビットでバンク選択
+                println!("Mapper 0: BG Switch enabled, bank: {}", self.bg_bank_selected);
+            } else {
+                // 通常はPRG ROMに書き込めない
+                eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+            }
+        } else {
+            // 通常はPRG ROMに書き込めない
+            eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+        }
     }
 
     fn read_chr(&self, addr: u16) -> u8 {
         let addr = addr & 0x1FFF; // Ensure address is within 8KB range
+        
         if self.chr_banks == 0 {
             // CHR RAM read
             if (addr as usize) < self.chr_ram.len() {
                 self.chr_ram[addr as usize]
             } else {
-                 eprintln!("WARN: Read out of bounds CHR RAM access at {:04X}", addr);
+                eprintln!("WARN: Read out of bounds CHR RAM access at {:04X}", addr);
                 0
             }
-         } else {
-             // CHR ROM read
-             // 常にアドレス範囲を安全に処理する
-             // let addr = addr & 0x1FFF; // Already done above
-             if (addr as usize) < self.chr_rom.len() {
-                 self.chr_rom[addr as usize]
-             } else {
-                 // 境界を超えた場合、エラーを表示（頻度を減らすために条件付き）
-                 if addr % 0x100 == 0 { // 256バイト毎に1回だけ警告を表示
-                     eprintln!("WARN: Read out of bounds CHR ROM access at {:04X}", addr);
-                 }
-                 // パターンテーブルが足りない場合は0を返す
-                 0
-             }
-         }
+        } else {
+            // CHR ROM read with BG切り替えスイッチ対応
+            if self.bg_switch_enabled && addr >= 0x1000 {
+                // パターンテーブル1のアクセス時、バンク切り替え
+                let bank_offset = self.bg_bank_selected as usize * 0x1000;
+                let offset_addr = addr as usize - 0x1000;
+                
+                if bank_offset + offset_addr < self.chr_rom.len() {
+                    return self.chr_rom[bank_offset + offset_addr];
+                } else {
+                    if addr % 0x100 == 0 {
+                        eprintln!("WARN: Read out of bounds CHR ROM bank access at {:04X}, bank: {}", 
+                            addr, self.bg_bank_selected);
+                    }
+                    return 0;
+                }
+            } else {
+                // 通常のCHR ROMアクセス
+                if (addr as usize) < self.chr_rom.len() {
+                    self.chr_rom[addr as usize]
+                } else {
+                    if addr % 0x100 == 0 {
+                        eprintln!("WARN: Read out of bounds CHR ROM access at {:04X}", addr);
+                    }
+                    0
+                }
+            }
+        }
     }
 
     fn write_chr(&mut self, addr: u16, data: u8) {
@@ -131,11 +163,11 @@ impl Mapper for Mapper0 {
                 // ★★★ ここまで ★★★
                 self.chr_ram[addr as usize] = data;
             } else {
-                 eprintln!("WARN: Write out of bounds CHR RAM access at {:04X}", addr);
+                eprintln!("WARN: Write out of bounds CHR RAM access at {:04X}", addr);
             }
         } else {
             // CHR ROM is generally not writable
-             eprintln!("WARN: Attempted write to CHR ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+            eprintln!("WARN: Attempted write to CHR ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
         }
     }
 
@@ -192,6 +224,9 @@ impl Cartridge {
                     chr_rom: chr_data,
                     chr_ram, // Add chr_ram field
                     mirroring,
+                    // BG切り替えスイッチ対応
+                    bg_switch_enabled: false,
+                    bg_bank_selected: 0,
                 })
             }
             // TODO: Add other mappers (1, 2, 3, 4, etc.) here

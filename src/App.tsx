@@ -82,21 +82,59 @@ function App() {
     // Function to draw frame data onto the main canvas
     const drawFrame = (frameData: FrameData) => {
         const canvas = canvasRef.current;
-        if (!canvas || !frameData) return;
+        if (!canvas || !frameData) {
+            console.error("No canvas or frame data available");
+            return;
+        }
+        
         const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+        if (!ctx) {
+            console.error("Could not get 2D context");
+            return;
+        }
 
         const { pixels, width, height } = frameData;
+        
         // Canvas dimensions should match the NES resolution
         canvas.width = width;
         canvas.height = height;
+        
+        console.log(`Setting canvas to ${width}x${height}`);
 
-        // Create ImageData from the raw pixel data (RGBA)
-        // Use Uint8ClampedArray for ImageData constructor
-        const imageData = new ImageData(new Uint8ClampedArray(pixels), width, height);
-
-        // Draw the ImageData onto the canvas
-        ctx.putImageData(imageData, 0, 0);
+        try {
+            // 直接ピクセルデータを設定する方法（画像データを使わない）
+            const imgData = ctx.createImageData(width, height);
+            const data = imgData.data;
+            
+            // ピクセルデータをコピー
+            for (let i = 0; i < pixels.length && i < data.length; i++) {
+                data[i] = pixels[i];
+            }
+            
+            // 画像データをキャンバスに描画
+            ctx.putImageData(imgData, 0, 0);
+            
+            console.log("Canvas updated successfully");
+            
+            // デバッグ用：簡単なパターンを直接描画してみる
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, 10, 10);
+            ctx.fillRect(width - 10, 0, 10, 10);
+            ctx.fillRect(0, height - 10, 10, 10);
+            ctx.fillRect(width - 10, height - 10, 10, 10);
+            
+            // 十字線を描画
+            ctx.strokeStyle = 'red';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(width / 2, 0);
+            ctx.lineTo(width / 2, height);
+            ctx.moveTo(0, height / 2);
+            ctx.lineTo(width, height / 2);
+            ctx.stroke();
+        } catch (error) {
+            console.error("Error drawing to canvas:", error);
+        }
     };
 
     // Main emulation loop using requestAnimationFrame
@@ -106,6 +144,43 @@ function App() {
             try {
                 // Fetch the frame data from the backend
                 const frameData: FrameData = await invoke('run_emulator_frame');
+                
+                // デバッグ情報を追加（開発中のみ）
+                console.log("Received frame data. Width:", frameData.width, "Height:", frameData.height);
+                // フレームデータの内容を確認（最初のピクセルと中央のピクセルの値）
+                if (frameData.pixels && frameData.pixels.length > 0) {
+                    console.log("First pixel RGBA:", 
+                        frameData.pixels[0], 
+                        frameData.pixels[1], 
+                        frameData.pixels[2], 
+                        frameData.pixels[3]
+                    );
+                    
+                    // 中央のピクセルを計算
+                    const centerIdx = (Math.floor(frameData.height / 2) * frameData.width + Math.floor(frameData.width / 2)) * 4;
+                    if (centerIdx + 3 < frameData.pixels.length) {
+                        console.log("Center pixel RGBA:", 
+                            frameData.pixels[centerIdx], 
+                            frameData.pixels[centerIdx + 1], 
+                            frameData.pixels[centerIdx + 2], 
+                            frameData.pixels[centerIdx + 3]
+                        );
+                    }
+                    
+                    // ピクセルデータの長さが正しいか確認
+                    const expectedLength = frameData.width * frameData.height * 4;
+                    console.log(`Pixel data length: ${frameData.pixels.length}, Expected: ${expectedLength}`);
+                    
+                    // データに0以外の値が含まれているか確認
+                    let nonZeroCount = 0;
+                    for (let i = 0; i < Math.min(frameData.pixels.length, 1000); i++) {
+                        if (frameData.pixels[i] !== 0) {
+                            nonZeroCount++;
+                        }
+                    }
+                    console.log(`Non-zero values in first 1000 pixels: ${nonZeroCount}`);
+                }
+                
                 // Draw the received frame onto the canvas
                 drawFrame(frameData);
             } catch (error) {

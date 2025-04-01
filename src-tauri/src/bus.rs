@@ -197,7 +197,12 @@ impl Bus {
                 if let Some(cart) = &self.cartridge {
                     let mirroring = cart.lock().unwrap().mirror_mode();
                     let mirrored_addr = self.ppu.mirror_vram_addr(addr, mirroring);
-                    self.ppu.vram.get(mirrored_addr as usize).copied().unwrap_or(0)
+                    if mirrored_addr < self.ppu.vram.len() {
+                        self.ppu.vram[mirrored_addr]
+                    } else {
+                        println!("Warning: Nametable read out of bounds: ${:04X} -> mirrored: ${:04X}", addr, mirrored_addr);
+                        0
+                    }
                 } else { 0 }
             }
             0x3F00..=0x3FFF => self.read_palette(addr), // Read Palette RAM
@@ -217,10 +222,10 @@ impl Bus {
                  if let Some(cart) = &self.cartridge {
                      let mirroring = cart.lock().unwrap().mirror_mode();
                      let mirrored_addr = self.ppu.mirror_vram_addr(addr, mirroring);
-                     if mirrored_addr < self.ppu.vram.len() as u16 {
-                        self.ppu.vram[mirrored_addr as usize] = data;
+                     if mirrored_addr < self.ppu.vram.len() {
+                        self.ppu.vram[mirrored_addr] = data;
                      } else {
-                        println!("Warning: Mirrored VRAM write out of bounds: {:04X} -> {:04X}", addr, mirrored_addr);
+                        println!("Warning: Mirrored VRAM write out of bounds: ${:04X} -> ${:04X}", addr, mirrored_addr);
                      }
                  }
             }
@@ -907,10 +912,12 @@ impl Bus {
                 },
                 
                 // ASL系命令
-                0x16 => { // ASL Zero Page,X (2 bytes, 6 cycles)
-                    let base_addr = self.read(pc);
-                    let zp_addr = (base_addr.wrapping_add(self.cpu.registers.index_x)) & 0xFF;
-                    let mut value = self.read(zp_addr as u16);
+                0x06 => { // ASL Zero Page (2 bytes, 5 cycles)
+                    let zp_addr = self.read(pc);
+                    let addr = zp_addr as u16; // ゼロページアドレス
+                    
+                    // ゼロページは常にRAMなので安全に書き込める
+                    let mut value = self.read(addr);
                     
                     // キャリーフラグを設定（値の最上位ビットに基づく）
                     if (value & 0x80) != 0 {
@@ -936,7 +943,43 @@ impl Bus {
                     };
                     
                     // 結果を書き戻す
-                    self.write(zp_addr as u16, value);
+                    self.write(addr, value);
+                    self.cpu.registers.program_counter = self.cpu.registers.program_counter.wrapping_add(1);
+                    cpu_cycles = 5;
+                }
+                0x16 => { // ASL Zero Page,X (2 bytes, 6 cycles)
+                    let base_addr = self.read(pc);
+                    let zp_addr = (base_addr.wrapping_add(self.cpu.registers.index_x)) & 0xFF;
+                    let addr = zp_addr as u16; // ゼロページアドレス
+                    
+                    // ゼロページは常にRAMなので安全に書き込める
+                    let mut value = self.read(addr);
+                    
+                    // キャリーフラグを設定（値の最上位ビットに基づく）
+                    if (value & 0x80) != 0 {
+                        self.cpu.registers.status |= crate::cpu::FLAG_CARRY;
+                    } else {
+                        self.cpu.registers.status &= !crate::cpu::FLAG_CARRY;
+                    }
+                    
+                    // 左シフト
+                    value = value << 1;
+                    
+                    // フラグ更新
+                    self.cpu.registers.status = if value == 0 {
+                        self.cpu.registers.status | crate::cpu::FLAG_ZERO
+                    } else {
+                        self.cpu.registers.status & !crate::cpu::FLAG_ZERO
+                    };
+                    
+                    self.cpu.registers.status = if (value & 0x80) != 0 {
+                        self.cpu.registers.status | crate::cpu::FLAG_NEGATIVE
+                    } else {
+                        self.cpu.registers.status & !crate::cpu::FLAG_NEGATIVE
+                    };
+                    
+                    // 結果を書き戻す
+                    self.write(addr, value);
                     self.cpu.registers.program_counter = self.cpu.registers.program_counter.wrapping_add(1);
                     cpu_cycles = 6;
                 }
@@ -1009,7 +1052,10 @@ impl Bus {
                 // 追加: ASL系命令
                 0x06 => { // ASL Zero Page (2 bytes, 5 cycles)
                     let zp_addr = self.read(pc);
-                    let mut value = self.read(zp_addr as u16);
+                    let addr = zp_addr as u16; // ゼロページアドレス
+                    
+                    // ゼロページは常にRAMなので安全に書き込める
+                    let mut value = self.read(addr);
                     
                     // キャリーフラグを設定（値の最上位ビットに基づく）
                     if (value & 0x80) != 0 {
@@ -1035,7 +1081,7 @@ impl Bus {
                     };
                     
                     // 結果を書き戻す
-                    self.write(zp_addr as u16, value);
+                    self.write(addr, value);
                     self.cpu.registers.program_counter = self.cpu.registers.program_counter.wrapping_add(1);
                     cpu_cycles = 5;
                 }
@@ -1154,30 +1200,59 @@ impl Bus {
                     let lo = self.read(pc);
                     let hi = self.read(pc.wrapping_add(1));
                     let addr = (hi as u16) << 8 | lo as u16;
-                    let mut value = self.read(addr);
                     
-                    // キャリーフラグに最下位ビットを設定
-                    if (value & 0x01) != 0 {
-                        self.cpu.registers.status |= crate::cpu::FLAG_CARRY;
+                    // ROMへの書き込みを回避するチェック
+                    if addr >= 0x8000 {
+                        // ROM領域への書き込みをシミュレートするが実際には書き込まない
+                        let value = self.read(addr);
+                        
+                        // キャリーフラグに最下位ビットを設定
+                        if (value & 0x01) != 0 {
+                            self.cpu.registers.status |= crate::cpu::FLAG_CARRY;
+                        } else {
+                            self.cpu.registers.status &= !crate::cpu::FLAG_CARRY;
+                        }
+                        
+                        // フラグ更新のみ実行（値は実際には変更しない）
+                        let result = value >> 1;
+                        self.cpu.registers.status = if result == 0 {
+                            self.cpu.registers.status | crate::cpu::FLAG_ZERO
+                        } else {
+                            self.cpu.registers.status & !crate::cpu::FLAG_ZERO
+                        };
+                        
+                        // ネガティブフラグはクリア
+                        self.cpu.registers.status &= !crate::cpu::FLAG_NEGATIVE;
+                        
+                        println!("ROM領域での LSR ${:04X} 操作をシミュレート（値は変更されません）", addr);
                     } else {
-                        self.cpu.registers.status &= !crate::cpu::FLAG_CARRY;
+                        // RAM領域での通常の操作
+                        let mut value = self.read(addr);
+                        
+                        // キャリーフラグに最下位ビットを設定
+                        if (value & 0x01) != 0 {
+                            self.cpu.registers.status |= crate::cpu::FLAG_CARRY;
+                        } else {
+                            self.cpu.registers.status &= !crate::cpu::FLAG_CARRY;
+                        }
+                        
+                        // 右シフト
+                        value = value >> 1;
+                        
+                        // フラグ更新
+                        self.cpu.registers.status = if value == 0 {
+                            self.cpu.registers.status | crate::cpu::FLAG_ZERO
+                        } else {
+                            self.cpu.registers.status & !crate::cpu::FLAG_ZERO
+                        };
+                        
+                        // ネガティブフラグはクリア
+                        self.cpu.registers.status &= !crate::cpu::FLAG_NEGATIVE;
+                        
+                        // 結果を書き戻す
+                        self.write(addr, value);
                     }
                     
-                    // 右シフト
-                    value = value >> 1;
-                    
-                    // フラグ更新
-                    self.cpu.registers.status = if value == 0 {
-                        self.cpu.registers.status | crate::cpu::FLAG_ZERO
-                    } else {
-                        self.cpu.registers.status & !crate::cpu::FLAG_ZERO
-                    };
-                    
-                    // ネガティブフラグはクリア（最上位ビットは常に0になるため）
-                    self.cpu.registers.status &= !crate::cpu::FLAG_NEGATIVE;
-                    
-                    // 結果を書き戻す
-                    self.write(addr, value);
                     self.cpu.registers.program_counter = self.cpu.registers.program_counter.wrapping_add(2);
                     cpu_cycles = 6;
                 }
@@ -1295,6 +1370,14 @@ impl Bus {
 
     // --- Getters for inspection/frontend ---
     pub fn get_ppu_frame(&self) -> FrameData { self.ppu.get_frame() }
+    
+    // フレームデータを設定（デバッグ用）
+    pub fn set_ppu_frame(&mut self, frame: FrameData) {
+        // PPUのフレームバッファを直接置き換える（デバッグ目的）
+        self.ppu.frame = frame;
+    }
+    
+    // CPU state inspection
     pub fn get_cpu_state(&self) -> InspectState { self.cpu.inspect() }
     
     // --- PPU Access Methods ---

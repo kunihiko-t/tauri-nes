@@ -25,73 +25,52 @@ const SCREEN_HEIGHT: usize = 240;
 // const STATUS_VBLANK: u8 = 0x80; // Use StatusRegister constants
 // const CTRL_VRAM_INCREMENT: u8 = 0x04; // Use ControlRegister constants
 
-#[derive(Default, Debug, Clone, Copy, Serialize)]
-pub struct VRamRegister {  // Make the struct public
-   pub address: u16, // Make the field public (internal representation, 15 bits used)
-}
-
-impl VRamRegister {
-    pub fn get(&self) -> u16 { self.address & 0x3FFF } // Make public - PPU addresses are 14-bit
-    pub fn set(&mut self, addr: u16) { self.address = addr & 0x7FFF; } // Make public - Internal register is 15 bits
-    pub fn increment(&mut self, amount: u16) { self.address = self.address.wrapping_add(amount); } // Make public
-    pub fn coarse_x(&self) -> u8 { (self.address & 0x001F) as u8 } // Make public
-    pub fn coarse_y(&self) -> u8 { ((self.address >> 5) & 0x001F) as u8 } // Make public
-    pub fn nametable_select(&self) -> u8 { ((self.address >> 10) & 0x0003) as u8 } // Make public
-    pub fn fine_y(&self) -> u8 { ((self.address >> 12) & 0x0007) as u8 } // Make public
-    pub fn set_coarse_x(&mut self, coarse_x: u8) { self.address = (self.address & !0x001F) | (coarse_x as u16 & 0x1F); } // Make public
-    pub fn set_coarse_y(&mut self, coarse_y: u8) { self.address = (self.address & !0x03E0) | ((coarse_y as u16 & 0x1F) << 5); } // Make public
-    pub fn set_nametable_select(&mut self, nt: u8) { self.address = (self.address & !0x0C00) | ((nt as u16 & 0x03) << 10); } // Make public
-    pub fn set_fine_y(&mut self, fine_y: u8) { self.address = (self.address & !0x7000) | ((fine_y as u16 & 0x07) << 12); } // Make public
-    pub fn copy_horizontal_bits(&mut self, t: &VRamRegister) { self.address = (self.address & !0x041F) | (t.address & 0x041F); } // Make public
-    pub fn copy_vertical_bits(&mut self, t: &VRamRegister) { self.address = (self.address & !0x7BE0) | (t.address & 0x7BE0); } // Make public
-}
-
 pub struct Ppu {
-    // PPUレジスタ (Busからアクセスするため pub に変更)
-    pub ctrl: ControlRegister,
-    pub mask: MaskRegister,
-    pub status: StatusRegister,
-    pub oam_addr: u8,
-    // oam_data: u8, // $2004 Read/Write (Direct OAM access often handled differently)
-
-    // Internal state (Busからアクセスするため pub に変更)
-    pub cycle: u16,          // Cycle count for the current scanline
-    pub scanline: u16,       // Current scanline number (0-261)
-    pub frame: FrameData,    // Framebuffer for the current frame
-    pub nmi_line_low: bool,  // Flag indicating NMI should be triggered
-    // pub nmi_output: bool,    // Whether NMI generation is enabled (from CTRL register)
-
-    // VRAM / Address Registers (Busからアクセスするため pub に変更)
-    pub vram_addr: AddrRegister, // Use the VRamRegister struct
-    pub temp_vram_addr: AddrRegister, // Temporary VRAM address ('t')
-    pub address_latch_low: bool, // For $2005/$2006 writes
-    pub fine_x_scroll: u8, // Fine X scroll (3 bits)
-
-    // Data I/O (Busからアクセスするため pub に変更)
-    pub data_buffer: u8,   // Buffer for $2007 reads
-
-    // OAM (Object Attribute Memory) (Busからアクセスするため pub に変更)
-    pub oam_data: [u8; 256],
-
-    // Palette RAM (32 bytes)
-    pub palette_ram: [u8; 32],
-
-    pub vram: Vec<u8>,         // Nametable RAM (2KB)
-    pub frame_complete: bool,
-    pub chr_ram: Vec<u8>, // CHR RAM for testing
-    pub write_latch: bool,           // Loopy's w register
-
-    // Internal rendering state (might be needed for accurate timing)
-    bg_next_tile_id: u8,
-    bg_next_tile_attrib: u8,
-    bg_next_tile_lsb: u8,
-    bg_next_tile_msb: u8,
-    bg_shifter_pattern_lo: u16,
-    bg_shifter_pattern_hi: u16,
-    bg_shifter_attrib_lo: u16,
-    bg_shifter_attrib_hi: u16,
-    // アニメーション用フレームカウンタを追加
-    pub frame_counter: u32,
+    // CPU接続
+    pub nmi_line_low: bool,         // NMI割り込みライン
+    
+    // PPUレジスタ
+    pub ctrl: ControlRegister,      // $2000 
+    pub mask: MaskRegister,         // $2001
+    pub status: StatusRegister,     // $2002
+    
+    // アドレス関連
+    pub vram_addr: AddrRegister,     // 現在のVRAMアドレス
+    pub temp_vram_addr: AddrRegister, // 一時VRAMアドレス
+    pub fine_x_scroll: u8,            // 水平方向の微調整スクロール
+    pub address_latch_low: bool,      // アドレスバイトラッチのフラグ
+    pub data_buffer: u8,              // PPUデータバッファ
+    
+    // OAM関連
+    pub oam_addr: u8,               // OAMアドレス
+    pub oam_data: [u8; 256],        // OAMデータ (64スプライト × 4バイト)
+    
+    // PPUタイミング
+    pub cycle: usize,                // 現在のピクセルサイクル (0-340)
+    pub scanline: isize,             // 現在のスキャンライン (-1 to 260)
+    pub frame_complete: bool,        // フレーム完了フラグ
+    pub frame_counter: u64,          // フレームカウンタ
+    
+    // メモリ
+    pub palette_ram: [u8; 32],       // パレットRAM
+    pub vram: [u8; 2048],            // 8KBのVRAM
+    pub chr_ram: [u8; 8192],         // 8KBのCHR-RAM
+    pub mirroring: Mirroring,        // ミラーリングモード
+    
+    // 背景レンダリング用レジスタ
+    pub bg_next_tile_id: u8,        // 次に描画するタイルのID
+    pub bg_next_tile_attr: u8,       // 次に描画するタイルの属性
+    pub bg_next_tile_lsb: u8,        // 次に描画するタイルの下位ビット
+    pub bg_next_tile_msb: u8,        // 次に描画するタイルの上位ビット
+    
+    // 背景シフトレジスタ
+    pub bg_shifter_pattern_lo: u16,  // 背景パターンシフトレジスタ（下位）
+    pub bg_shifter_pattern_hi: u16,  // 背景パターンシフトレジスタ（上位）
+    pub bg_shifter_attrib_lo: u16,   // 背景属性シフトレジスタ（下位）
+    pub bg_shifter_attrib_hi: u16,   // 背景属性シフトレジスタ（上位）
+    
+    // フレームデータ
+    pub frame: FrameData,           // 現在のフレームデータ
 }
 
 impl Ppu {
@@ -112,14 +91,13 @@ impl Ppu {
             data_buffer: 0,
             oam_data: [0; 256],
             palette_ram: [0; 32],
-            vram: vec![0; 2048],
+            vram: [0; 2048],
             frame_complete: false,
-            chr_ram: vec![0; 8192], // Remove if using Cartridge CHR directly
-            write_latch: false,
+            chr_ram: [0; 8192], // Remove if using Cartridge CHR directly
 
             // Initialize internal rendering state
             bg_next_tile_id: 0,
-            bg_next_tile_attrib: 0,
+            bg_next_tile_attr: 0,
             bg_next_tile_lsb: 0,
             bg_next_tile_msb: 0,
             bg_shifter_pattern_lo: 0,
@@ -127,6 +105,8 @@ impl Ppu {
             bg_shifter_attrib_lo: 0,
             bg_shifter_attrib_hi: 0,
             frame_counter: 0,
+
+            mirroring: Mirroring::FourScreen,
         };
         
         // パレットの初期化 - NESの標準パレットに近い色を設定
@@ -174,30 +154,139 @@ impl Ppu {
 
     // テスト用のパターンを描画
     fn init_test_pattern(&mut self) {
-        // シンプルなパターンを作成
+        println!("初期テストパターンを描画中...");
+        
+        // フレームバッファをクリア
+        for i in 0..self.frame.pixels.len() {
+            self.frame.pixels[i] = 0;
+        }
+        
+        // グラデーションパターンを作成
         for y in 0..SCREEN_HEIGHT {
             for x in 0..SCREEN_WIDTH {
                 let index = (y * SCREEN_WIDTH + x) * 4;
                 
-                // 画面を4つの領域に分ける
-                let color = if x < SCREEN_WIDTH/2 && y < SCREEN_HEIGHT/2 {
-                    // 左上: 赤
-                    (255, 0, 0)
-                } else if x >= SCREEN_WIDTH/2 && y < SCREEN_HEIGHT/2 {
-                    // 右上: 緑
-                    (0, 255, 0)
-                } else if x < SCREEN_WIDTH/2 && y >= SCREEN_HEIGHT/2 {
-                    // 左下: 青
-                    (0, 0, 255)
-                } else {
-                    // 右下: 黄色
-                    (255, 255, 0)
-                };
+                // グラデーションカラーの計算
+                let r = (x * 255 / SCREEN_WIDTH) as u8;
+                let g = (y * 255 / SCREEN_HEIGHT) as u8;
+                let b = ((x + y) * 128 / (SCREEN_WIDTH + SCREEN_HEIGHT)) as u8;
                 
-                self.frame.pixels[index] = color.0;
-                self.frame.pixels[index + 1] = color.1;
-                self.frame.pixels[index + 2] = color.2;
+                // フレームバッファに色を設定
+                self.frame.pixels[index] = r;
+                self.frame.pixels[index + 1] = g;
+                self.frame.pixels[index + 2] = b;
                 self.frame.pixels[index + 3] = 255; // Alpha
+            }
+        }
+        
+        // 白い十字線を描画
+        let center_x = SCREEN_WIDTH / 2;
+        let center_y = SCREEN_HEIGHT / 2;
+        
+        for i in 0..SCREEN_WIDTH {
+            let h_index = (center_y * SCREEN_WIDTH + i) * 4;
+            if h_index + 3 < self.frame.pixels.len() {
+                self.frame.pixels[h_index] = 255;
+                self.frame.pixels[h_index + 1] = 255;
+                self.frame.pixels[h_index + 2] = 255;
+                self.frame.pixels[h_index + 3] = 255;
+            }
+        }
+        
+        for i in 0..SCREEN_HEIGHT {
+            let v_index = (i * SCREEN_WIDTH + center_x) * 4;
+            if v_index + 3 < self.frame.pixels.len() {
+                self.frame.pixels[v_index] = 255;
+                self.frame.pixels[v_index + 1] = 255;
+                self.frame.pixels[v_index + 2] = 255;
+                self.frame.pixels[v_index + 3] = 255;
+            }
+        }
+        
+        // 白い枠線を描画
+        for i in 0..SCREEN_WIDTH {
+            // 上端
+            let top_index = i * 4;
+            if top_index + 3 < self.frame.pixels.len() {
+                self.frame.pixels[top_index] = 255;
+                self.frame.pixels[top_index + 1] = 255;
+                self.frame.pixels[top_index + 2] = 255;
+                self.frame.pixels[top_index + 3] = 255;
+            }
+            
+            // 下端
+            let bottom_index = ((SCREEN_HEIGHT - 1) * SCREEN_WIDTH + i) * 4;
+            if bottom_index + 3 < self.frame.pixels.len() {
+                self.frame.pixels[bottom_index] = 255;
+                self.frame.pixels[bottom_index + 1] = 255;
+                self.frame.pixels[bottom_index + 2] = 255;
+                self.frame.pixels[bottom_index + 3] = 255;
+            }
+        }
+        
+        for i in 0..SCREEN_HEIGHT {
+            // 左端
+            let left_index = (i * SCREEN_WIDTH) * 4;
+            if left_index + 3 < self.frame.pixels.len() {
+                self.frame.pixels[left_index] = 255;
+                self.frame.pixels[left_index + 1] = 255;
+                self.frame.pixels[left_index + 2] = 255;
+                self.frame.pixels[left_index + 3] = 255;
+            }
+            
+            // 右端
+            let right_index = (i * SCREEN_WIDTH + SCREEN_WIDTH - 1) * 4;
+            if right_index + 3 < self.frame.pixels.len() {
+                self.frame.pixels[right_index] = 255;
+                self.frame.pixels[right_index + 1] = 255;
+                self.frame.pixels[right_index + 2] = 255;
+                self.frame.pixels[right_index + 3] = 255;
+            }
+        }
+        
+        // パターンテーブルのタイルを表示するテスト（左上隅に16x16タイル）
+        for tile_y in 0..16 {
+            for tile_x in 0..16 {
+                let tile_index = tile_y * 16 + tile_x;
+                self.draw_chr_tile(tile_x * 8, tile_y * 8, tile_index, 0); // パレット0を使用
+            }
+        }
+        
+        println!("初期テストパターン描画完了！");
+    }
+
+    // CHR-RAMからタイルを描画する補助メソッド
+    fn draw_chr_tile(&mut self, x_pos: usize, y_pos: usize, tile_index: usize, palette: usize) {
+        let base_addr = tile_index * 16; // 各タイルは16バイト
+        
+        for y in 0..8 {
+            let low_byte = self.chr_ram[base_addr + y];
+            let high_byte = self.chr_ram[base_addr + y + 8];
+            
+            for x in 0..8 {
+                let bit = 7 - x; // ビット位置は反転している
+                let low_bit = (low_byte >> bit) & 0x01;
+                let high_bit = (high_byte >> bit) & 0x01;
+                let pixel_value = (high_bit << 1) | low_bit;
+                
+                if pixel_value > 0 { // 0以外のピクセルのみ描画（0は透明）
+                    let color_addr = (palette * 4 + pixel_value as usize) % 32;
+                    let color_idx = self.palette_ram[color_addr] as usize;
+                    let (r, g, b) = NES_PALETTE[color_idx & 0x3F];
+                    
+                    let screen_x = x_pos + x;
+                    let screen_y = y_pos + y;
+                    
+                    if screen_x < SCREEN_WIDTH && screen_y < SCREEN_HEIGHT {
+                        let idx = (screen_y * SCREEN_WIDTH + screen_x) * 4;
+                        if idx + 3 < self.frame.pixels.len() {
+                            self.frame.pixels[idx] = r;
+                            self.frame.pixels[idx + 1] = g;
+                            self.frame.pixels[idx + 2] = b;
+                            self.frame.pixels[idx + 3] = 255;
+                        }
+                    }
+                }
             }
         }
     }
@@ -214,6 +303,18 @@ impl Ppu {
         self.data_buffer = 0;
         self.oam_addr = 0;
         self.frame_counter = 0;
+        
+        // 背景レンダリング用レジスタを初期化
+        self.bg_next_tile_id = 0;
+        self.bg_next_tile_attr = 0;
+        self.bg_next_tile_lsb = 0;
+        self.bg_next_tile_msb = 0;
+        
+        // 背景シフトレジスタを初期化
+        self.bg_shifter_pattern_lo = 0;
+        self.bg_shifter_pattern_hi = 0;
+        self.bg_shifter_attrib_lo = 0;
+        self.bg_shifter_attrib_hi = 0;
 
         // PPUレジスタをリセット
         self.status.register = 0x00;
@@ -258,177 +359,500 @@ impl Ppu {
         self.palette_ram[0x18] = self.palette_ram[0x08];
         self.palette_ram[0x1C] = self.palette_ram[0x0C];
         
+        // テスト用のCHR-RAMデータをセットアップ（パターンテーブルデータをシミュレート）
+        self.init_test_chr_data();
+        
         // 初期状態のフラグを設定
         self.ctrl.set_bits(0x90);  // NMI有効化など
-        self.mask.set_bits(0x1E);  // 背景とスプライトを有効化
+        // マスクレジスタを更新して背景とスプライトを表示
+        self.mask.set_bits(0x1E);  // 背景とスプライトを有効化（0x1EはBGとスプライト両方有効）
         
         println!("PPU Reset complete - Blue color scheme initialized");
+        println!("PPU Mask Register: {:02X} (BG enabled: {}, Sprites enabled: {})",
+                 self.mask.bits(), self.mask.show_background(), self.mask.show_sprites());
+        println!("PPU Control Register: {:02X} (NMI enabled: {}, Pattern Table: ${:04X})",
+                 self.ctrl.bits(), 
+                 self.ctrl.generate_nmi(), 
+                 if self.ctrl.background_pattern_addr() == 0 { 0x0000 } else { 0x1000 });
+        
+        // テストパターンを描画（デバッグ用）
+        self.init_test_pattern();
     }
 
-    // Simulate PPU stepping by ONE PPU cycle
-    pub fn step(&mut self) { // Correct signature: No arguments
-        // --- Logic based on current cycle/scanline ---
-        let current_scanline = self.scanline;
-        let current_cycle = self.cycle;
+    // テスト用のCHR-RAMデータを初期化
+    fn init_test_chr_data(&mut self) {
+        // シンプルなパターンデータを作成（8x8タイルのテスト用パターン）
+        
+        // パターン0: 中央に点がある
+        let pattern0_lo = [
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00011000,
+            0b00011000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+        ];
+        
+        let pattern0_hi = [
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00011000,
+            0b00011000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+        ];
+        
+        // パターン1: 格子柄
+        let pattern1_lo = [
+            0b10101010,
+            0b00000000,
+            0b10101010,
+            0b00000000,
+            0b10101010,
+            0b00000000,
+            0b10101010,
+            0b00000000,
+        ];
+        
+        let pattern1_hi = [
+            0b00000000,
+            0b10101010,
+            0b00000000,
+            0b10101010,
+            0b00000000,
+            0b10101010,
+            0b00000000,
+            0b10101010,
+        ];
+        
+        // パターン2: 外枠
+        let pattern2_lo = [
+            0b11111111,
+            0b10000001,
+            0b10000001,
+            0b10000001,
+            0b10000001,
+            0b10000001,
+            0b10000001,
+            0b11111111,
+        ];
+        
+        let pattern2_hi = [
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+            0b00000000,
+        ];
+        
+        // テストパターンをCHR-RAMに書き込む
+        // パターン0
+        for i in 0..8 {
+            self.chr_ram[i] = pattern0_lo[i];
+            self.chr_ram[i + 8] = pattern0_hi[i];
+        }
+        
+        // パターン1
+        for i in 0..8 {
+            self.chr_ram[16 + i] = pattern1_lo[i];
+            self.chr_ram[16 + i + 8] = pattern1_hi[i];
+        }
+        
+        // パターン2
+        for i in 0..8 {
+            self.chr_ram[32 + i] = pattern2_lo[i];
+            self.chr_ram[32 + i + 8] = pattern2_hi[i];
+        }
+        
+        // ネームテーブルにテストタイルを配置（画面左上の数タイル）
+        for i in 0..16 {
+            self.vram[i] = (i % 3) as u8;  // パターン0,1,2を繰り返す
+        }
+        
+        // 属性テーブルも初期化
+        self.vram[0x3C0] = 0x55;  // パレット1をデフォルトに
+        
+        println!("Test CHR-RAM and nametable data initialized");
+    }
 
-        // --- VBlank/NMI Timing --- (Actions happen based on the state *at* this cycle)
-        if current_scanline == 241 && current_cycle == 1 {
-            self.status.set_vblank_started(true);
-            self.frame_complete = true; // Signal frame ready
+    // PPUの1サイクル分の更新を行う
+    pub fn step(&mut self) {
+        // フレームが完了したかどうかをチェック
+        if self.frame_complete {
+            // フレーム完了時にデバッグ出力を追加
+            if self.frame_counter % 60 == 0 {
+                println!("PPU: フレーム {}完了。パレットRAM状態: [{:02X}, {:02X}, {:02X}, {:02X}]", 
+                    self.frame_counter,
+                    self.palette_ram[0], self.palette_ram[1], self.palette_ram[2], self.palette_ram[3]);
+                
+                // CHR-ROMの最初の数バイトを表示（パターンテーブルのデータが正しいか確認）
+                println!("CHR-ROM先頭データ: {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X} {:02X}",
+                         self.chr_ram[0], self.chr_ram[1], self.chr_ram[2], self.chr_ram[3],
+                         self.chr_ram[4], self.chr_ram[5], self.chr_ram[6], self.chr_ram[7]);
+                
+                // レンダリング情報のサマリーを出力
+                println!("PPU レンダリング状態サマリー:");
+                println!("  コントロール: {:02X}, マスク: {:02X}, ステータス: {:02X}",
+                         self.ctrl.bits(), self.mask.bits(), self.status.bits());
+                println!("  背景表示: {}, スプライト表示: {}, NMI有効: {}",
+                         self.mask.show_background(), self.mask.show_sprites(), self.ctrl.generate_nmi());
+                println!("  VRAMアドレス: ${:04X}, 一時アドレス: ${:04X}",
+                         self.vram_addr.addr(), self.temp_vram_addr.addr());
+                println!("  パターンテーブル: ${:04X}", if self.ctrl.background_pattern_addr() == 0 { 0x0000 } else { 0x1000 });
+                
+                // テスト - フレームの一部をデバッグカラーで塗りつぶす
+                self.draw_debug_pattern();
+
+                // 毎フレーム、強制的にテストパターンを描画（デバッグ用）
+                if self.frame_counter < 10 {
+                    self.init_test_pattern();
+                    println!("強制的にテストパターンを描画しました（デバッグ用）");
+                }
+            }
             
-            // フレームが完了したらフレームカウンタをインクリメント
-            self.frame_counter = self.frame_counter.wrapping_add(1);
-            
-            // 100フレームごとにデバッグ出力
-            if self.frame_counter % 100 == 0 {
-                println!("PPU Frame: {}", self.frame_counter);
+            // フレーム完了フラグをリセット
+            self.frame_complete = false;
+            return;
+        }
+        
+        // レンダリングが有効かどうかをチェック
+        let rendering_enabled = self.mask.show_background() || self.mask.show_sprites();
+        
+        // レンダリング有効フラグが変わったときにデバッグ出力
+        static mut PREV_RENDERING: bool = false;
+        let cur_rendering = rendering_enabled;
+        unsafe {
+            if cur_rendering != PREV_RENDERING {
+                println!("PPU: レンダリング状態が変更: {} -> {}", PREV_RENDERING, cur_rendering);
+                PREV_RENDERING = cur_rendering;
             }
         }
-        if current_scanline == 261 && current_cycle == 1 { // Pre-render line start
-            self.status.set_vblank_started(false);
-            self.status.set_sprite_overflow(false);
-            self.status.set_sprite_zero_hit(false);
-        }
 
-        // --- Rendering Logic --- 
-        // ビジブルラインの場合のみ、基本的なピクセル計算を行う
-        let rendering_enabled = self.mask.show_background() || self.mask.show_sprites();
-        let is_visible_scanline = current_scanline < 240;
-        
-        if is_visible_scanline && current_cycle >= 1 && current_cycle <= 256 {
-            let x = (current_cycle - 1) as usize;
-            let y = current_scanline as usize;
-            
-            if rendering_enabled {
-                // --- リッチアニメーションシステム ---
-                
-                // ベースとなる時間ファクター
-                let main_time = self.frame_counter as f32 * 0.02;
-                let slow_time = self.frame_counter as f32 * 0.01;
-                let fast_time = self.frame_counter as f32 * 0.04;
-                
-                // 画面位置の正規化座標 (0.0 〜 1.0)
-                let nx = x as f32 / SCREEN_WIDTH as f32;
-                let ny = y as f32 / SCREEN_HEIGHT as f32;
-                
-                // 画面中心からの距離
-                let cx = nx - 0.5;
-                let cy = ny - 0.5;
-                let dist_center = (cx * cx + cy * cy).sqrt();
-                
-                // 複数のアニメーションパターン生成
-                
-                // 1. モザイクパターン (大きさが時間とともに変化)
-                let mosaic_size = 4.0 + (main_time.sin() * 0.5 + 0.5) * 20.0;
-                let mosaic_x = (x as f32 / mosaic_size).floor() as i32;
-                let mosaic_y = (y as f32 / mosaic_size).floor() as i32;
-                let mosaic = (mosaic_x + mosaic_y) % 2 == 0;
-                
-                // 2. 同心円パターン (中心から広がる波)
-                let circle_speed = 1.0 + (slow_time.cos() * 0.5 + 0.5) * 3.0;
-                let circle_phase = (dist_center * 10.0 - main_time * circle_speed) % 1.0;
-                let circle = circle_phase > 0.5;
-                
-                // 3. 螺旋パターン
-                let angle = ny.atan2(nx) * 3.0;
-                let spiral = ((angle + main_time) % 1.0) > 0.5;
-                
-                // 4. 交差する波パターン
-                let wave_x = (nx * 10.0 + main_time).sin();
-                let wave_y = (ny * 10.0 + main_time * 0.7).cos();
-                let waves = (wave_x * wave_y) > 0.0;
-                
-                // 5. 複合パターン - 時間によって変化
-                let time_segment = ((self.frame_counter / 180) % 4) as usize;
-                let pattern = match time_segment {
-                    0 => mosaic as usize,
-                    1 => circle as usize,
-                    2 => spiral as usize,
-                    _ => waves as usize,
-                };
-                
-                // 色パレットセット（時間で循環）
-                let color_sets = [
-                    // 青と水色のセット
-                    [0x01, 0x11, 0x21, 0x31, 0x0C, 0x1C, 0x2C, 0x3C],
-                    // 緑と黄緑のセット
-                    [0x09, 0x19, 0x29, 0x39, 0x0A, 0x1A, 0x2A, 0x3A],
-                    // 紫とピンクのセット
-                    [0x04, 0x14, 0x24, 0x34, 0x05, 0x15, 0x25, 0x35],
-                    // 赤とオレンジのセット
-                    [0x06, 0x16, 0x26, 0x36, 0x07, 0x17, 0x27, 0x37],
-                ];
-                
-                // カラーセットの選択（90秒ごとに変更）
-                let color_set_index = ((self.frame_counter / (60 * 90)) % color_sets.len() as u32) as usize;
-                let colors = &color_sets[color_set_index];
-                
-                // 明暗の選択と色相シフトを時間で変化
-                let hue_shift = ((main_time * 0.5).sin() * 0.5 + 0.5) * 4.0;
-                let shade_index = (hue_shift as usize) % 4;
-                
-                // パターンに基づく色の選択
-                let color_index = match pattern {
-                    1 => colors[shade_index],          // 明るい色
-                    _ => colors[4 + (shade_index % 4)], // 暗い色
-                };
-                
-                // 特殊効果 - フラッシュと暗転
-                let special_effect = match self.frame_counter % 600 {
-                    597..=599 => true, // 暗転効果
-                    298..=300 => true, // 中間フラッシュ
-                    _ => false,
-                };
-                
-                // 時々画面の一部に波紋エフェクト
-                let ripple_effect = self.frame_counter % 300 >= 150 && self.frame_counter % 300 < 180;
-                let ripple_intensity = if ripple_effect {
-                    let t = (self.frame_counter % 300 - 150) as f32 / 30.0;
-                    let phase = t * std::f32::consts::PI * 2.0;
-                    let ripple_distance = (dist_center * 20.0 - fast_time * 5.0).sin() * 0.5 + 0.5;
-                    (phase.sin() * ripple_distance) * 0.7 + 0.3
-                } else {
-                    1.0
-                };
-                
-                // 最終的な色の決定
-                let final_color = if special_effect {
-                    0x0F // 黒色
-                } else if ripple_effect && ripple_intensity < 0.5 {
-                    // 波紋の暗い部分
-                    0x0F
-                } else {
-                    color_index
-                };
-                
-                // NESパレットからRGB値を取得
-                let (r, g, b) = NES_PALETTE[final_color as usize & 0x3F];
-                
-                // フレームバッファに書き込み
-                let frame_idx = (y * SCREEN_WIDTH + x) * 4;
-                if frame_idx + 3 < self.frame.pixels.len() {
-                    self.frame.pixels[frame_idx] = r;
-                    self.frame.pixels[frame_idx + 1] = g;
-                    self.frame.pixels[frame_idx + 2] = b;
-                    self.frame.pixels[frame_idx + 3] = 255;
+        // 背景タイル情報の取得
+        if (self.scanline >= 0 && self.scanline < 240) || self.scanline == 261 {
+            // 背景シフトレジスタの更新（1ドットごとに1ビットずつシフト）
+            if (self.cycle >= 1 && self.cycle <= 256) || (self.cycle >= 328 && self.cycle <= 340) {
+                if self.mask.show_background() {
+                    // パターンシフトレジスタを1ビット左シフト
+                    self.bg_shifter_pattern_lo <<= 1;
+                    self.bg_shifter_pattern_hi <<= 1;
+                    self.bg_shifter_attrib_lo <<= 1;
+                    self.bg_shifter_attrib_hi <<= 1;
                 }
             }
         }
 
-        // --- PPU timing simulation ---
-        self.cycle += 1;
-        if self.cycle > 340 { // End of scanline
-            self.cycle = 0;
-            self.scanline += 1;
+        // 可視領域のレンダリング（0-239ライン、0-255サイクル）
+        if self.scanline < 240 && self.cycle < 256 && rendering_enabled {
+            let x = self.cycle as usize;
+            // scanlineはisizeなので、負の値の場合は0にクリップ
+            let y = if self.scanline >= 0 { self.scanline as usize } else { 0 };
             
-            if self.scanline > 261 { // End of frame
-                self.scanline = 0;
+            // PPUアドレス計算（タイルベースのレンダリング）
+            // ネームテーブルベースアドレス（VRAM上の位置）
+            let nametable_base = 0x2000 | (self.vram_addr.addr() & 0x0FFF);
+            
+            // タイル座標の計算
+            let tile_x = self.vram_addr.coarse_x() as u16;
+            let tile_y = self.vram_addr.coarse_y() as u16;
+            let fine_y = self.vram_addr.fine_y() as u16;
+            
+            // デバッグ出力
+            if self.cycle == 0 && self.scanline % 20 == 0 {
+                println!("PPU Debug - Tile coords: x={}, y={}, fine_y={}, nametable_base=${:04X}", 
+                         tile_x, tile_y, fine_y, nametable_base);
+                
+                // マスクレジスタの状態も出力
+                println!("PPU Debug - Mask: {:02X} (BG:{}, Sprites:{})", 
+                         self.mask.bits(), 
+                         self.mask.show_background(), 
+                         self.mask.show_sprites());
+            }
+            
+            // タイルインデックスを取得（安全な計算）
+            let tile_idx = (tile_y as u16).wrapping_mul(32).wrapping_add(tile_x);
+            
+            let tile_addr = nametable_base + tile_idx;
+            
+            // タイルIDを読み取る（VRAMアクセス）
+            let tile_id = self.read_vram(tile_addr);
+            
+            // 属性テーブルアドレスの計算（安全にu16で計算）
+            let attr_x = tile_x >> 2;
+            let attr_y = tile_y >> 2;
+            // シフト演算する代わりにより安全な足し算を使用
+            let attr_shift = attr_y.wrapping_mul(8).wrapping_add(attr_x);
+            
+            // デバッグ出力
+            if self.cycle == 0 && self.scanline % 20 == 0 {
+                println!("PPU Debug - Attr calc: attr_x={}, attr_y={}, shift=${:04X}", 
+                         attr_x, attr_y, attr_shift);
+            }
+            
+            let attribute_addr = 0x23C0 | (self.vram_addr.addr() & 0x0C00) | attr_shift;
+            
+            // 属性値を読み取る
+            let attribute = self.read_vram(attribute_addr);
+            
+            // 属性内のサブセクションを選択（u16で安全に計算）
+            let shift = ((tile_y & 0x02) << 1) | (tile_x & 0x02);
+            let palette_idx = (attribute >> shift) & 0x03;
+            
+            // パターンテーブルアドレスの計算
+            // デバッグ用にパターンテーブルの計算を表示
+            let pattern_base_addr = if self.ctrl.background_pattern_addr() == 0 {
+                0x0000_u16
+            } else {
+                0x1000_u16
+            };
+            
+            // デバッグ出力を強化
+            if self.cycle == 0 && self.scanline % 20 == 0 {
+                println!("PPU Debug - Pattern calc: tile_id={:02X}, pattern_base=${:04X}", 
+                         tile_id, pattern_base_addr);
+                println!("PPU Debug - Tile info: tile_x={}, tile_y={}, fine_y={}", 
+                         tile_x, tile_y, fine_y);
+            }
+            
+            // オーバーフロー対策: u16型の範囲内で計算
+            let tile_id_u16 = tile_id as u16;
+            let fine_y_u16 = fine_y as u16;
+            
+            // タイルオフセットの計算（タイル1つあたり16バイト）
+            let tile_offset = tile_id_u16.wrapping_mul(16);
+            
+            // パターンテーブル内でのアドレス計算（完全に分解して計算）
+            let lo_pattern_addr = pattern_base_addr.wrapping_add(tile_offset).wrapping_add(fine_y_u16);
+            let hi_pattern_addr = lo_pattern_addr.wrapping_add(8);
+            
+            if self.cycle == 0 && self.scanline % 20 == 0 {
+                println!("PPU Debug - Pattern addr: lo=${:04X}, hi=${:04X}, tile_offset=${:04X}", 
+                         lo_pattern_addr, hi_pattern_addr, tile_offset);
+            }
+            
+            // パターンデータ（タイルのピクセルデータ）を読み取る
+            let pattern_lo = self.read_vram(lo_pattern_addr);
+            let pattern_hi = self.read_vram(hi_pattern_addr);
+            
+            // パターンデータをデバッグ表示（定期的に）
+            if self.cycle == 0 && self.scanline % 60 == 0 {
+                println!("PPU Debug - Pattern data: lo=${:02X}, hi=${:02X} (tile_id=${:02X})", 
+                         pattern_lo, pattern_hi, tile_id);
+            }
+            
+            // 水平反転でないので、左から右に処理
+            let fine_x = (7 - (x % 8)) as u8; // タイル内の水平位置（反転して処理）
+            
+            // パターンからピクセル値を取得
+            let lo_bit = (pattern_lo >> fine_x) & 0x01;
+            let hi_bit = (pattern_hi >> fine_x) & 0x01;
+            let pixel_value = (hi_bit << 1) | lo_bit;
+            
+            // ピクセルデータをデバッグ表示（スパース表示）
+            if (x % 32 == 0) && (y % 32 == 0) {
+                println!("PPU Debug - Pixel at ({},{}) = {} (palette: {})", 
+                         x, y, pixel_value, palette_idx);
+            }
+            
+            // 背景色の場合（0）と非背景色の場合で処理分け
+            if pixel_value == 0 {
+                // 背景色（ユニバーサルバックグラウンド）
+                let color_addr = 0;
+                let color_idx = self.palette_ram[color_addr] as usize;
+                let (r, g, b) = NES_PALETTE[color_idx & 0x3F];
+                
+                // ランダムな位置でデバッグ出力
+                if (x % 64 == 0) && (y % 64 == 0) {
+                    println!("PPU Debug - 背景色ピクセル({},{}) = パレット[{}]=${:02X} -> RGB({},{},{})", 
+                             x, y, color_addr, color_idx, r, g, b);
+                }
+                
+                let idx = (y * SCREEN_WIDTH + x) * 4;
+                if idx + 3 < self.frame.pixels.len() {
+                    self.frame.pixels[idx] = r;
+                    self.frame.pixels[idx + 1] = g;
+                    self.frame.pixels[idx + 2] = b;
+                    self.frame.pixels[idx + 3] = 255;
+                }
+            } else {
+                // パレットインデックスの計算
+                let color_addr = (palette_idx * 4 + pixel_value as u8) as usize;
+                let color_idx = self.palette_ram[color_addr] as usize;
+                let (r, g, b) = NES_PALETTE[color_idx & 0x3F];
+                
+                // カラーデータをデバッグ表示（スパース表示）
+                if (x % 32 == 0) && (y % 32 == 0) {
+                    println!("PPU Debug - 前景色ピクセル({},{}) = パレット[{}]=${:02X} -> RGB({},{},{}), pixel_value={}, palette_idx={}", 
+                             x, y, color_addr, color_idx, r, g, b, pixel_value, palette_idx);
+                }
+                
+                let idx = (y * SCREEN_WIDTH + x) * 4;
+                if idx + 3 < self.frame.pixels.len() {
+                    self.frame.pixels[idx] = r;
+                    self.frame.pixels[idx + 1] = g;
+                    self.frame.pixels[idx + 2] = b;
+                    self.frame.pixels[idx + 3] = 255;
+                }
             }
         }
         
-        // --- NMI Line Update --- 
-        let nmi_asserted = self.status.vblank_started() && self.ctrl.generate_nmi();
-        self.nmi_line_low = !nmi_asserted; // Line is low (active) when asserted
+        // PPUサイクルを進める
+        self.cycle += 1;
+        if self.cycle >= 341 {
+            self.cycle = 0;
+            self.scanline += 1;
+            
+            if self.scanline >= 261 {
+                self.scanline = 0;
+                self.frame_complete = true;
+                self.frame_counter += 1;
+            }
+        }
+        
+        // VBlankフラグとNMI生成
+        if self.scanline == 241 && self.cycle == 1 {
+            self.status.set_vblank_started(true);
+            if self.ctrl.generate_nmi() {
+                self.nmi_line_low = false;
+            }
+        }
+        else if self.scanline == 261 && self.cycle == 1 {
+            // VBlank終了時（プリレンダースキャンライン）
+            self.status.set_vblank_started(false);
+            self.status.set_sprite_zero_hit(false);
+            self.status.set_sprite_overflow(false);
+            self.nmi_line_low = true;
+        }
+
+        // レンダリングが有効な場合、水平・垂直スクロールの処理を行う
+        if rendering_enabled {
+            // 各スキャンラインの可視領域の最後でx座標をインクリメント
+            if self.cycle == 256 && self.scanline < 240 {
+                self.increment_scroll_x();
+            }
+            
+            // 各スキャンラインの特定の位置でy座標をインクリメント
+            if self.cycle == 257 && self.scanline < 240 {
+                self.increment_scroll_y();
+            }
+            
+            // PPUアドレスの水平ビットを更新（水平スクロールをリセット）
+            if self.cycle == 257 && self.scanline <= 239 {
+                self.transfer_address_x();
+            }
+            
+            // 垂直スクロールの更新（プリレンダーラインの特定のサイクルで）
+            if self.scanline == 261 && self.cycle >= 280 && self.cycle <= 304 {
+                self.transfer_address_y();
+            }
+        }
+    }
+    
+    // PPUサイクルごとのスクロール更新
+    fn increment_scroll_x(&mut self) {
+        if self.mask.show_background() || self.mask.show_sprites() {
+            if self.vram_addr.inc_coarse_x() {
+                // coarse_xが一周した場合のみnametableを切り替える
+                println!("Horizontal nametable switch");
+            }
+        }
+    }
+    
+    fn increment_scroll_y(&mut self) {
+        if self.mask.show_background() || self.mask.show_sprites() {
+            if self.vram_addr.inc_fine_y() {
+                // fine_yが一周した場合のみcoarse_yをインクリメント
+                println!("Vertical scroll increment");
+            }
+        }
+    }
+    
+    fn transfer_address_x(&mut self) {
+        if self.mask.show_background() || self.mask.show_sprites() {
+            self.vram_addr.copy_horizontal_bits(&self.temp_vram_addr);
+        }
+    }
+    
+    fn transfer_address_y(&mut self) {
+        if self.mask.show_background() || self.mask.show_sprites() {
+            self.vram_addr.copy_vertical_bits(&self.temp_vram_addr);
+        }
+    }
+
+    // VRAMアドレスのミラーリングを行う
+    pub fn mirror_vram_addr(&self, addr: u16, mirroring: Mirroring) -> usize {
+        let addr = addr as usize & 0x3FFF; // 14ビットに制限
+        
+        if addr <= 0x1FFF {
+            // パターンテーブル領域 ($0000-$1FFF)
+            return addr;
+        } else if addr <= 0x3EFF {
+            // ネームテーブル領域 ($2000-$3EFF)
+            // 実際の2KBのVRAMにマッピング
+            let addr = addr & 0x0FFF; // $2000-$2FFFの範囲に変換
+            let table = addr / 0x0400; // テーブル番号 (0-3)
+            
+            match mirroring {
+                Mirroring::Horizontal => {
+                    // 水平ミラーリング: 0,1は0へ、2,3は1へマップ
+                    let mirrored_table = table & 0x01;
+                    (mirrored_table * 0x0400) | (addr & 0x03FF)
+                }
+                Mirroring::Vertical => {
+                    // 垂直ミラーリング: 0,2は0へ、1,3は1へマップ
+                    let mirrored_table = table & 0x02;
+                    (mirrored_table * 0x0200) | (addr & 0x03FF)
+                }
+                Mirroring::SingleScreenLower => {
+                    // 1画面ミラーリング (下部): すべて0へマップ
+                    addr & 0x03FF
+                }
+                Mirroring::SingleScreenUpper => {
+                    // 1画面ミラーリング (上部): すべて1へマップ
+                    0x0400 | (addr & 0x03FF)
+                }
+                Mirroring::FourScreen => {
+                    // 4画面: そのまま
+                    addr
+                }
+            }
+        } else {
+            // パレットRAM領域 ($3F00-$3FFF)
+            let palette_addr = addr & 0x1F;
+            // パレットのミラーリング
+            if palette_addr == 0x10 || palette_addr == 0x14 || 
+               palette_addr == 0x18 || palette_addr == 0x1C {
+                return palette_addr & 0x0F;
+            } else {
+                return palette_addr;
+            }
+        }
+    }
+
+    // VRAMからデータを読み取る
+    pub fn read_vram(&self, addr: u16) -> u8 {
+        let addr_masked = addr & 0x3FFF; // 14ビットアドレス空間に制限
+        
+        if addr_masked <= 0x1FFF {
+            // パターンテーブル ($0000-$1FFF)
+            // カートリッジのCHR-ROMまたはCHR-RAMから読み取り
+            return self.chr_ram[addr_masked as usize];
+        } else if addr_masked <= 0x3EFF {
+            // ネームテーブル ($2000-$2FFF), ミラー ($3000-$3EFF)
+            // 内部実装ではMirroringを持っていないため、単純に下位11ビットを使う
+            let mirrored_addr = (addr_masked as usize & 0x0FFF) % self.vram.len();
+            return self.vram[mirrored_addr];
+        } else {
+            // パレットデータ ($3F00-$3FFF)
+            return self.read_palette_ram(addr);
+        }
     }
 
     // Placeholder for PPU reads - Replace with Bus calls eventually
@@ -436,8 +860,8 @@ impl Ppu {
         match addr & 0x3FFF {
             0x0000..=0x1FFF => self.chr_ram.get(addr as usize).copied().unwrap_or(0), // Use CHR RAM
             0x2000..=0x3EFF => { // Simulate VRAM read with mirroring
-                let mirrored_addr = self.mirror_vram_addr(addr, Mirroring::Vertical); // Placeholder mirroring
-                 self.vram.get(mirrored_addr as usize).copied().unwrap_or(0)
+                let mirrored_addr = self.mirror_vram_addr(addr, Mirroring::FourScreen); // Placeholder mirroring
+                 self.vram.get(mirrored_addr).copied().unwrap_or(0)
             }
             0x3F00..=0x3FFF => self.read_palette_ram(addr), // Read directly from palette RAM
             _ => 0,
@@ -447,11 +871,16 @@ impl Ppu {
     // Direct read from palette RAM, handling mirroring
     fn read_palette_ram(&self, addr: u16) -> u8 {
         let index = (addr & 0x1F) as usize;
-        let mirrored_index = match index {
-            0x10 | 0x14 | 0x18 | 0x1C => index & 0x0F, // Mirror $3F1x to $3F0x
-            _ => index,
+        
+        // ミラーリング処理
+        let mirrored_index = if index == 0x10 || index == 0x14 || 
+                               index == 0x18 || index == 0x1C {
+            index & 0x0F
+        } else {
+            index
         };
-        self.palette_ram[mirrored_index] & 0x3F // Mask to 6 bits
+        
+        self.palette_ram[mirrored_index]
     }
 
     // Helper to get pixel from background shifters
@@ -503,6 +932,7 @@ impl Ppu {
         self.vram_addr.increment(increment);
     }
 
+    // PPUCTRLレジスタ ($2000) の書き込み処理
     pub fn write_ctrl(&mut self, data: u8) {
         let old_nmi_enable = self.ctrl.generate_nmi();
         self.ctrl.set_bits(data);
@@ -545,23 +975,8 @@ impl Ppu {
     }
 
     // --- Loopy VRAM Helpers --- (Need full implementation based on nesdev wiki)
-     fn increment_scroll_x(&mut self) { /* ... */ }
-     fn increment_scroll_y(&mut self) { /* ... */ }
-     fn transfer_address_x(&mut self) { /* ... */ }
-     fn transfer_address_y(&mut self) { /* ... */ }
-     fn update_shifters(&mut self) { /* ... */ }
-     fn load_background_shifters(&mut self) { /* ... */ }
-     pub fn read_oam_data(&self) -> u8 { self.oam_data[self.oam_addr as usize] }
-     pub fn mirror_vram_addr(&self, _addr: u16, _mode: Mirroring) -> u16 { 
-        // Simplified placeholder - actual logic depends on mirroring mode
-        // For example, for Horizontal mirroring:
-        // let mirrored_addr = addr & 0b1011_1111_1111; // Clear bit 10
-        // For Vertical mirroring:
-        // let mirrored_addr = addr & 0b1111_0111_1111; // Clear bit 11
-        // return mirrored_addr;
-        _addr // Return unmodified address for now
-     }
-     pub fn get_frame(&self) -> FrameData { self.frame.clone() } // Use FrameData below
+    pub fn read_oam_data(&self) -> u8 { self.oam_data[self.oam_addr as usize] }
+    pub fn get_frame(&self) -> FrameData { self.frame.clone() } // Use FrameData below
 
     // VRAM Access Helpers (バスからのアクセス用)
     pub fn get_vram_address(&self) -> u16 {
@@ -593,45 +1008,6 @@ impl Ppu {
         println!("PPU OAM DMA triggered with page ${:02X}", page);
     }
 
-    // VRAM読み書き
-    pub fn read_vram(&self, addr: u16) -> u8 {
-        let addr = addr & 0x3FFF; // 14ビットアドレスマスク
-        match addr {
-            0x0000..=0x1FFF => {
-                // パターンテーブル (CHR ROM/RAM)
-                // 実際にはこの部分は外部（Cartridge）によって処理される
-                self.chr_ram.get(addr as usize).copied().unwrap_or(0)
-            }
-            0x2000..=0x3EFF => {
-                // ネームテーブル（PPU内部VRAM）
-                let mirrored_addr = self.mirror_vram_addr(addr, Mirroring::Vertical) & 0x07FF;
-                self.vram.get(mirrored_addr as usize).copied().unwrap_or(0)
-            }
-            _ => 0 // 不正なアドレス
-        }
-    }
-
-    pub fn write_vram(&mut self, addr: u16, data: u8) {
-        let addr = addr & 0x3FFF; // 14ビットアドレスマスク
-        match addr {
-            0x0000..=0x1FFF => {
-                // パターンテーブル (CHR ROM/RAM)
-                // 実際にはこの部分は外部（Cartridge）によって処理される
-                if (addr as usize) < self.chr_ram.len() {
-                    self.chr_ram[addr as usize] = data;
-                }
-            }
-            0x2000..=0x3EFF => {
-                // ネームテーブル（PPU内部VRAM）
-                let mirrored_addr = self.mirror_vram_addr(addr, Mirroring::Vertical) & 0x07FF;
-                if (mirrored_addr as usize) < self.vram.len() {
-                    self.vram[mirrored_addr as usize] = data;
-                }
-            }
-            _ => {} // 不正なアドレス
-        }
-    }
-
     // パレットRAM用メソッド
     pub fn read_palette(&self, addr: u8) -> u8 {
         let index = (addr & 0x1F) as usize;
@@ -649,6 +1025,23 @@ impl Ppu {
             _ => index,
         };
         self.palette_ram[mirrored_index] = data & 0x3F; // 6ビットにマスク
+    }
+
+    // テスト - フレームの一部をデバッグカラーで塗りつぶす
+    fn draw_debug_pattern(&mut self) {
+        // テスト - フレームの一部をデバッグカラーで塗りつぶす
+        for y in 0..16 {
+            for x in 0..16 {
+                let idx = (y * SCREEN_WIDTH + x) * 4;
+                // インデックスが有効範囲内か確認
+                if idx + 3 < self.frame.pixels.len() {
+                    self.frame.pixels[idx] = 255;
+                    self.frame.pixels[idx + 1] = 0;
+                    self.frame.pixels[idx + 2] = 0;
+                    self.frame.pixels[idx + 3] = 255;
+                }
+            }
+        }
     }
 }
 

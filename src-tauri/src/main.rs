@@ -118,6 +118,17 @@ fn monitor_address(state: tauri::State<'_, Arc<Mutex<Emulator>>>, addr: u16) -> 
     }
 }
 
+// ここでキーイベント処理メソッドを追加
+#[tauri::command]
+fn handle_keyboard_event(key_code: &str, pressed: bool, state: tauri::State<Arc<Mutex<Emulator>>>) -> Result<(), String> {
+    let mut emulator = state.lock().map_err(|e| format!("Failed to lock emulator: {}", e))?;
+    
+    // エミュレータにキーイベントを渡す
+    emulator.handle_input(key_code, pressed);
+    
+    Ok(())
+}
+
 fn main() {
     // NesEmuを使用
     let nes_emu = NesEmu::new();
@@ -136,7 +147,8 @@ fn main() {
             debug_stack,
             get_state_info,
             debug_current_code,
-            monitor_address
+            monitor_address,
+            handle_keyboard_event
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
