@@ -508,13 +508,13 @@ impl Ppu {
                 println!("  パターンテーブル: ${:04X}", if self.ctrl.background_pattern_addr() == 0 { 0x0000 } else { 0x1000 });
                 
                 // テスト - フレームの一部をデバッグカラーで塗りつぶす
-                self.draw_debug_pattern();
+                // self.draw_debug_pattern();
 
                 // 毎フレーム、強制的にテストパターンを描画（デバッグ用）
-                if self.frame_counter < 10 {
-                    self.init_test_pattern();
-                    println!("強制的にテストパターンを描画しました（デバッグ用）");
-                }
+                // if self.frame_counter < 10 {
+                //     self.init_test_pattern();
+                //     println!("強制的にテストパターンを描画しました（デバッグ用）");
+                // }
             }
             
             // フレーム完了フラグをリセット
