@@ -9,65 +9,247 @@
 
 
 /* App.css */
+:root {
+  --main-bg-color: #1a1a20;
+  --main-text-color: #f0f0f2;
+  --accent-color: #4a6da7;
+  --border-color: #444;
+  --success-color: #4caf50;
+  --warning-color: #ff9800;
+  --danger-color: #f44336;
+  --status-bg-color: #2c2c34;
+  --controls-bg-color: #2c2c34;
+  --button-bg-color: #4a6da7;
+  --button-hover-color: #5d80ba;
+  --button-active-color: #3a5a8f;
+}
+
+/* フォントフェイスの定義 */
+@font-face {
+  font-family: 'NotoSansJP';
+  src: local('Noto Sans JP'), url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap');
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'NotoSans';
+  src: local('Noto Sans'), url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;700&display=swap');
+  font-display: swap;
+}
+
 body {
-  font-family: 'Arial', sans-serif;
-  background-color: #f5f5f5;
   margin: 0;
   padding: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
+  font-family: 'Noto Sans JP', 'Noto Sans', 'Hiragino Kaku Gothic Pro', 'メイリオ', 'Meiryo', 'MS Pゴシック', 'MS PGothic', sans-serif;
+  background-color: var(--main-bg-color);
+  color: var(--main-text-color);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 .container {
-  text-align: center;
-  background-color: #ffffff;
-  padding: 2rem;
-  border-radius: 8px;
-  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+  max-width: 100%;
+  min-height: 100vh;
+  margin: 0 auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  font-family: 'Noto Sans JP', 'Noto Sans', 'Hiragino Kaku Gothic Pro', 'メイリオ', 'Meiryo', 'MS Pゴシック', 'MS PGothic', sans-serif;
+  background-color: var(--main-bg-color);
+}
+
+h1, h2, h3, h4, h5, h6, p, span, div, button {
+  font-family: 'Noto Sans JP', 'Noto Sans', 'Hiragino Kaku Gothic Pro', 'メイリオ', 'Meiryo', 'MS Pゴシック', 'MS PGothic', sans-serif;
 }
 
 h1 {
-  color: #333333;
+  color: var(--main-text-color);
   margin-bottom: 1.5rem;
+  font-size: 2rem;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
-button {
-  background-color: #007bff;
-  color: #ffffff;
+.canvas-container {
+  margin: 1rem 0;
+  position: relative;
+  width: 512px;
+  height: 480px;
+  background-color: #000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 2px solid #444;
+}
+
+.canvas-container canvas {
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  image-rendering: -moz-crisp-edges;
+  image-rendering: crisp-edges;
+}
+
+.control-panel {
+  margin: 1.5rem 0;
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  width: 100%;
+  max-width: 512px;
+}
+
+.control-panel button {
+  padding: 0.6rem 1.2rem;
+  background-color: var(--button-bg-color);
+  color: white;
   border: none;
-  padding: 10px 20px;
-  border-radius: 5px;
+  border-radius: 4px;
   cursor: pointer;
-  transition: background-color 0.3s ease;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+  flex: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
 }
 
-button:hover {
-  background-color: #0056b3;
+.control-panel button:hover {
+  background-color: var(--button-hover-color);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
 }
 
-canvas {
-  margin-top: 1rem;
-  border: 1px solid #ccc;
+.control-panel button:active {
+  background-color: var(--button-active-color);
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
-
-#chrCanvas {
-  border: 1px solid black; /* 境界線を設定 */
-  width: 256px;  /* 幅を設定 */
-  height: 256px; /* 高さを設定 */
-}
-
-/* App.cssに追加 */
-.cpu-state {
-  text-align: left;
-  margin-top: 1rem;
+/* ステータス表示のスタイル */
+.status-container {
+  margin: 1rem 0;
   padding: 1rem;
-  background-color: #eee;
+  background-color: var(--status-bg-color);
   border-radius: 8px;
+  width: 100%;
+  max-width: 512px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  color: var(--main-text-color);
+  border: 1px solid var(--border-color);
 }
 
-.cpu-state p {
-  margin: 0.5rem 0;
+.status-indicator {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.7rem;
+  font-weight: bold;
+  font-size: 1.1rem;
+}
+
+.status-indicator.not {
+  color: #999;
+}
+
+.status-indicator.loading {
+  color: var(--warning-color);
+}
+
+.status-indicator.loaded {
+  color: var(--success-color);
+}
+
+.status-indicator.error {
+  color: var(--danger-color);
+}
+
+.status-indicator span {
+  font-weight: normal;
+  margin-left: 0.5rem;
+}
+
+.frame-info {
+  margin-bottom: 0.7rem;
+  font-size: 1rem;
+  color: #bbb;
+}
+
+.debug-info {
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+  border-top: 1px solid #444;
+  font-size: 0.9rem;
+  color: #999;
+}
+
+.debug-info p {
+  margin: 0.4rem 0;
+}
+
+/* コントロール情報のスタイル */
+.controls-info {
+  margin: 1rem 0 2rem 0;
+  padding: 1.2rem;
+  background-color: var(--controls-bg-color);
+  border-radius: 8px;
+  width: 100%;
+  max-width: 512px;
+  box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+  color: var(--main-text-color);
+  border: 1px solid var(--border-color);
+}
+
+.controls-info h3 {
+  margin-top: 0;
+  color: #ff9800;
+  border-bottom: 1px solid #444;
+  padding-bottom: 0.7rem;
+  font-size: 1.2rem;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.controls-info ul {
+  list-style-type: none;
+  padding: 0;
+  margin-top: 1rem;
+}
+
+.controls-info li {
+  margin: 0.7rem 0;
+  padding: 0.3rem 0;
+  display: flex;
+  align-items: center;
+}
+
+.controls-info strong {
+  display: inline-block;
+  width: 100px;
+  color: #5d80ba;
+  background-color: rgba(93, 128, 186, 0.1);
+  padding: 0.3rem 0.6rem;
+  border-radius: 4px;
+  margin-right: 1rem;
+  text-align: center;
+  font-weight: 600;
+}
+
+/* レスポンシブ対応 */
+@media (max-width: 768px) {
+  .canvas-container {
+    width: 100%;
+    height: auto;
+    aspect-ratio: 256 / 240;
+  }
+  
+  .control-panel {
+    flex-direction: column;
+    align-items: center;
+  }
+  
+  .control-panel button {
+    width: 100%;
+    max-width: 300px;
+  }
 }

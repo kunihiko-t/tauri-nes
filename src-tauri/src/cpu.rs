@@ -1,6 +1,13 @@
 use serde::Serialize;
-use crate::bus::Bus; // Use Bus instead of Memory
+use log;
+// use crate::bus::Bus; // Use Bus instead of Memory // Keep commented or adjust if Bus is directly used
+// use crate::bus::Bus; // ★★★ Use Bus directly ★★★ // Remove direct Bus dependency
+use crate::bus::BusAccess; // ★★★ 追加: bus.rs の BusAccess を使用 ★★★
 // use crate::debugger::Debugger; // Debugger integration can be added later
+
+// バス操作を表す Enum (削除)
+// #[derive(Debug, Clone, PartialEq)]
+// pub enum BusAction { ... }
 
 // Status Register Flags
 const CARRY_FLAG: u8 = 0b00000001;
@@ -13,14 +20,28 @@ const OVERFLOW_FLAG: u8 = 0b01000000;
 const NEGATIVE_FLAG: u8 = 0b10000000;
 
 // Registers struct, InspectState struct, AddressingMode enum, etc.
-#[derive(Default, Debug, Serialize, Clone)] // Add Serialize
+#[derive(Debug, Serialize, Clone)] // Defaultを削除
 pub struct Registers {
     pub accumulator: u8,
-    pub index_x: u8,
-    pub index_y: u8,
+    pub x_register: u8,
+    pub y_register: u8,
     pub stack_pointer: u8,
     pub program_counter: u16,
     pub status: u8,
+}
+
+// Registerのトレイト実装を上書きして正しい初期値を設定
+impl Default for Registers {
+    fn default() -> Self {
+        Self {
+            accumulator: 0,
+            x_register: 0,
+            y_register: 0,
+            stack_pointer: 0xFD, // 初期値を正しく0xFDに設定
+            program_counter: 0,
+            status: 0x24,       // IRQ disable + unused bit
+        }
+    }
 }
 
 #[derive(Serialize, Clone)] // Add Serialize
@@ -29,94 +50,112 @@ pub struct InspectState {
     pub total_cycles: u64, // Add total cycles if needed
 }
 
-#[derive(Debug)]
-pub enum AddressingMode { Implied, Accumulator, Immediate, ZeroPage, ZeroPageX, ZeroPageY, Relative, Absolute, AbsoluteX, AbsoluteY, Indirect, IndexedIndirect, IndirectIndexed } // Ensure all modes are defined
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AddressingMode {
+    Implied,
+    Accumulator,
+    Immediate,
+    ZeroPage,
+    ZeroPageX,
+    ZeroPageY,
+    Relative,
+    Absolute,
+    AbsoluteX,
+    AbsoluteY,
+    Indirect,
+    IndexedIndirect,
+    IndirectIndexed,
+}
 
 // Status flag constants
 pub const FLAG_CARRY: u8 = 1 << 0;
 pub const FLAG_ZERO: u8 = 1 << 1;
 pub const FLAG_INTERRUPT_DISABLE: u8 = 1 << 2;
-pub const FLAG_DECIMAL_MODE: u8 = 1 << 3; // Not used in NES
-pub const FLAG_BREAK: u8 = 1 << 4;
-pub const FLAG_UNUSED: u8 = 1 << 5;
+pub const FLAG_DECIMAL: u8 = 1 << 3; // NESでは使用されないが、6502互換性のため
+pub const FLAG_BREAK: u8 = 1 << 4;   // ソフトウェアBRK命令フラグ
+pub const FLAG_UNUSED: u8 = 1 << 5;  // 常に1
 pub const FLAG_OVERFLOW: u8 = 1 << 6;
 pub const FLAG_NEGATIVE: u8 = 1 << 7;
 
 // The 6502 CPU core
-#[derive(Debug)] // Added Debug derive for easier inspection if needed
+#[derive(Debug, Clone, Serialize)]
 pub struct Cpu6502 {
     pub registers: Registers,
-    opcode: u8, // Current opcode
+    pub cycles: u8,
+    nmi_pending: bool,
+    brk_executed: bool,
 }
+
+// DEBUGフラグの設定
+const DEBUG_PRINT: bool = false;
+
+// 命令実行のデバッグログを制限
+static mut DEBUG_COUNTER: u32 = 0;
+static mut DEBUG_LOG_DONE: bool = false;
+
+// 定数を追加
+pub const STACK_BASE: u16 = 0x0100;
+pub const STACK_RESET: u8 = 0xFD;
+pub const NMI_VECTOR_ADDR: u16 = 0xFFFA;
+pub const RESET_VECTOR_ADDR: u16 = 0xFFFC;
+pub const IRQ_BRK_VECTOR_ADDR: u16 = 0xFFFE;
 
 impl Cpu6502 {
     pub fn new() -> Self {
-        Self {
-            registers: Registers::default(),
-            opcode: 0,
+        Cpu6502 {
+            registers: Registers {
+                accumulator: 0,
+                x_register: 0,
+                y_register: 0,
+                stack_pointer: 0xFD,
+                program_counter: 0, // Will be set by reset vector
+                status: 0b0010_0100, // IRQ disabled, B flag set? Check initial status
+            },
+            cycles: 0,
+            nmi_pending: false,
+            brk_executed: false,
         }
     }
 
-    // Reset the CPU to its initial state - Restored method
-    pub fn reset(&mut self, bus: &mut Bus) {
-        // Read reset vector
-        let lo = bus.read(0xFFFC);
-        let hi = bus.read(0xFFFD);
-        self.registers.program_counter = u16::from_le_bytes([lo, hi]);
+    // Reset the CPU state
+    pub fn reset(&mut self, bus: &mut impl BusAccess) {
+        println!("CPU Reset started...");
+        // Fetch the reset vector from memory addresses $FFFC and $FFFD
+        let reset_vector = bus.read_u16(RESET_VECTOR_ADDR);
+        println!("[CPU Reset] Read reset vector ${:04X} from ${:04X}", reset_vector, RESET_VECTOR_ADDR);
+        self.registers.program_counter = reset_vector;
 
-        // Reset registers
-        self.registers.stack_pointer = self.registers.stack_pointer.wrapping_sub(3);
-        self.registers.status |= FLAG_INTERRUPT_DISABLE; // Set I flag
-        // Note: Reset does not affect A, X, Y registers
+        // Reset registers to initial state
+        self.registers.accumulator = 0;
+        self.registers.x_register = 0;
+        self.registers.y_register = 0;
+        self.registers.stack_pointer = STACK_RESET;
+        // Set specific flags according to NES documentation (e.g., interrupt disable)
+        self.registers.status = FLAG_INTERRUPT_DISABLE | FLAG_UNUSED; // Set unused and IRQ disable flags
 
-        // Reset takes 7 cycles (accounted for by Bus)
+        // Reset cycle count. Reset typically takes 8 cycles.
+        self.cycles = 8;
+        self.nmi_pending = false;
+        self.brk_executed = false;
+        println!("CPU Reset complete: PC set to ${:04X}, Status: ${:02X}", self.registers.program_counter, self.registers.status);
     }
 
-    // --- Bus Access --- (Renamed from Memory Access)
-    // Reads a byte from the bus
-    fn read(&self, bus: &mut Bus, addr: u16) -> u8 { // Takes &mut Bus
-        // --- DEBUG Zero Page Read ---
-        /* // コメントアウト
-        if addr == 0x00B5 { // Check if reading from the address being compared in the loop
-             println!(
-                 "[CPU Read Attempt] Addr: {:04X} (PC: {:04X}, Cycle: {})",
-                 addr, self.program_counter, bus.total_cycles
-             );
-         }
-         */
-        // --- END DEBUG ---
-        bus.read(addr)
-    }
+    // --- Restore Old Bus Access Helpers (if needed, though BusAccess is preferred) ---
+    // fn read(&self, bus: &impl BusAccess, addr: u16) -> u8 { bus.read(addr) }
+    // fn write(&self, bus: &impl BusAccess, addr: u16, data: u8) { bus.write(addr, data) }
+    // fn read_u16(&self, bus: &impl BusAccess, addr: u16) -> u16 { bus.read_u16(addr) }
 
-    // Writes a byte to the bus
-    fn write(&self, bus: &mut Bus, addr: u16, data: u8) {
-        // --- DEBUG CPU WRITE --- 
-        /* // コメントアウト
-        println!(
-            "[CPU Write Attempt] Addr: {:04X}, Data: {:02X} (PC: {:04X}, Cycle: {})", 
-            addr, data, self.program_counter, bus.total_cycles
-        );
-        */
-        // --- END DEBUG ---
+    // --- Restore Old Stack Helpers ---
+    fn push(&mut self, bus: &mut impl BusAccess, data: u8) {
+        let addr = 0x0100 + self.registers.stack_pointer as u16;
         bus.write(addr, data);
-    }
-
-    // Reads a 16-bit word (little-endian) from the bus
-    fn read_u16(&self, bus: &mut Bus, addr: u16) -> u16 { // Takes &mut Bus
-        let lo = self.read(bus, addr) as u16;
-        let hi = self.read(bus, addr.wrapping_add(1)) as u16;
-        (hi << 8) | lo
-    }
-
-    // --- Stack Operations ---
-    fn push(&mut self, bus: &mut Bus, value: u8) { // Changed memory to bus
-        self.write(bus, 0x0100 + self.registers.stack_pointer as u16, value);
         self.registers.stack_pointer = self.registers.stack_pointer.wrapping_sub(1);
     }
 
-    fn pull(&mut self, bus: &mut Bus) -> u8 { // Already takes &mut Bus
+    fn pull(&mut self, bus: &mut impl BusAccess) -> u8 {
         self.registers.stack_pointer = self.registers.stack_pointer.wrapping_add(1);
-        self.read(bus, 0x0100 + self.registers.stack_pointer as u16)
+        let addr = 0x0100 + self.registers.stack_pointer as u16;
+        bus.read(addr)
     }
 
     // --- Flag Updates ---
@@ -133,698 +172,882 @@ impl Cpu6502 {
         }
     }
 
-    // --- Addressing Mode Implementations ---
-    // Returns the effective address for a given mode, and potentially reads the operand value
-    // Also increments PC as needed. Returns the calculated address.
-    // Note: Relative mode calculates the *target* address.
-    // Implied/Accumulator modes should not call this.
-    fn get_operand_address(&mut self, bus: &mut Bus, mode: AddressingMode) -> u16 { // Takes &mut Bus
+    fn compare(&mut self, reg: u8, operand: u8) {
+        let result = reg.wrapping_sub(operand);
+        self.update_nz_flags(result);
+        if reg >= operand {
+            self.registers.status |= FLAG_CARRY;
+        } else {
+            self.registers.status &= !FLAG_CARRY;
+        }
+    }
+
+    // --- Restore Original Step Method ---
+    pub fn step(&mut self, bus: &mut impl BusAccess) -> u8 {
+        // --- Add log BEFORE fetching opcode ---
+        // println!("[CPU Step Start] PC=${:04X}", self.registers.program_counter); // Keep this log <-- Remove
+
+        // NMI/IRQ handling... (keep as is)
+        if self.nmi_pending {
+            // println!("[CPU Step] NMI detected! Handling NMI...");
+            self.handle_nmi(bus);
+            self.nmi_pending = false;
+            return self.cycles;
+        }
+        let irq_disabled = self.registers.status & FLAG_INTERRUPT_DISABLE != 0;
+        if !irq_disabled && self.check_irq(bus) {
+            self.handle_irq(bus);
+            return self.cycles;
+        }
+
+        self.cycles = 0;
+        let current_pc = self.registers.program_counter; // Store PC before incrementing
+
+        // オペコードのフェッチ
+        let opcode = bus.read(current_pc); // Read from current_pc
+        self.registers.program_counter = self.registers.program_counter.wrapping_add(1); // Increment PC *after* read
+
+        // --- Add Debug Print for fetched opcode at target PC --- ★★★ 追加 ★★★
+        // if current_pc == 0xF982 { // <-- Remove block
+        //      println!("[CPU @ {:04X}] Fetched Opcode {:02X}", current_pc, opcode);
+        // }
+
+        // デコードと実行
+        let (mode, base_cycles, instr_name) = self.decode_opcode(opcode); // Capture instr_name
+
+        // --- Add Debug Print for decoded instruction at target PC --- ★★★ 追加 ★★★
+        // if current_pc == 0xF982 { // <-- Remove block
+        //      println!("[CPU @ {:04X}] Decoded: Name={}, Mode={:?}, BaseCycles={}", current_pc, instr_name, mode, base_cycles);
+        // }
+
+        let (addr, addr_cycles) = self.calculate_effective_address(bus, mode);
+
+        // --- Add Debug Print before execution at target PC --- ★★★ 追加 ★★★
+        // if current_pc == 0xF982 { // <-- Remove block
+        //      println!("[CPU @ {:04X}] Executing... Addr=${:04X}, AddrCycles={}", current_pc, addr, addr_cycles);
+        // }
+
+        // 命令の実行
+        let execution_extra_cycles = self.execute_instruction(bus, opcode, addr, mode, current_pc);
+        // println!("[CPU @ {:04X}] Returned from execute_instruction.", current_pc); // ★★★ 追加 ★★★ <-- Remove
+
+        self.cycles += base_cycles + addr_cycles + execution_extra_cycles;
+        // println!("[CPU @ {:04X}] Cycles updated.", current_pc); // ★★★ 追加 ★★★ <-- Remove
+
+        // --- Add Debug Print for state AFTER execution (Modify to include F982) ---
+        // if current_pc == 0xF982 || current_pc == 0xFA87 { // Include both PCs <-- Remove block
+        //      println!("[CPU @ {:04X}] Preparing end log...", current_pc); // ★★★ 追加 ★★★
+        //      println!("[CPU @ {:04X} end] Opcode {:02X} ({}) executed. Final PC = {:04X}, Final Status = ${:02X}, Cycles = {}",
+        //               current_pc, opcode, instr_name, self.registers.program_counter, self.registers.status, self.cycles);
+        // }
+        // println!("[CPU @ {:04X}] After end log block.", current_pc); // ★★★ 追加 ★★★ <-- Remove
+
+        // BRK命令の場合はフラグを設定
+        if opcode == 0x00 {
+            self.brk_executed = true;
+        }
+         // println!("[CPU @ {:04X}] Before returning cycles.", current_pc); // ★★★ 追加 ★★★ <-- Remove
+
+        self.cycles // Return total cycles for this step
+    }
+
+    // IRQが必要かチェックする関数
+    fn check_irq(&self, _bus: &impl BusAccess) -> bool {
+        // ここでハードウェアIRQ信号をチェックする
+        // NESでは通常、マッパーかAPUがIRQを生成
+        // 現在は単純に偽を返す
+        false
+    }
+
+    // IRQ処理を行う関数
+    fn handle_irq(&mut self, bus: &mut impl BusAccess) {
+        // スタックにレジスタをプッシュ
+        self.push(bus, (self.registers.program_counter >> 8) as u8);
+        self.push(bus, self.registers.program_counter as u8);
+
+        // Bフラグなしでステータスをプッシュするためにコピー
+        let mut status_copy = self.registers.status;
+        status_copy &= !FLAG_BREAK; // BRKフラグをクリア
+        status_copy |= FLAG_UNUSED; // 未使用フラグをセット
+        self.push(bus, status_copy);
+
+        // 割り込み禁止フラグをセット
+        self.registers.status |= FLAG_INTERRUPT_DISABLE;
+
+        // IRQベクトルをロード
+        self.registers.program_counter = bus.read_u16(IRQ_BRK_VECTOR_ADDR);
+
+        // IRQ処理は7サイクルかかる
+        self.cycles = 7;
+    }
+
+    // ダミーのデコード関数（実際の命令情報を返す必要がある）
+    // TODO: Populate with all opcodes and correct cycle counts / page crossing info
+    fn decode_opcode(&self, opcode: u8) -> (AddressingMode, u8, &'static str) {
+        match opcode {
+            // Official Opcodes (Partial List)
+            0x00 => (AddressingMode::Implied, 7, "BRK"),
+            0xEA => (AddressingMode::Implied, 2, "NOP"),
+            // LDA
+            0xA9 => (AddressingMode::Immediate, 2, "LDA"),
+            0xA5 => (AddressingMode::ZeroPage, 3, "LDA"),
+            0xB5 => (AddressingMode::ZeroPageX, 4, "LDA"),
+            0xAD => (AddressingMode::Absolute, 4, "LDA"),
+            0xBD => (AddressingMode::AbsoluteX, 4, "LDA"), // +1 cycle if page crossed
+            0xB9 => (AddressingMode::AbsoluteY, 4, "LDA"), // +1 cycle if page crossed
+            0xA1 => (AddressingMode::IndexedIndirect, 6, "LDA"),
+            0xB1 => (AddressingMode::IndirectIndexed, 5, "LDA"), // +1 cycle if page crossed
+            // LDX
+            0xA2 => (AddressingMode::Immediate, 2, "LDX"),
+            0xA6 => (AddressingMode::ZeroPage, 3, "LDX"),
+            0xB6 => (AddressingMode::ZeroPageY, 4, "LDX"),
+            0xAE => (AddressingMode::Absolute, 4, "LDX"),
+            0xBE => (AddressingMode::AbsoluteY, 4, "LDX"), // +1 cycle if page crossed
+            // LDY
+            0xA0 => (AddressingMode::Immediate, 2, "LDY"),
+            0xA4 => (AddressingMode::ZeroPage, 3, "LDY"),
+            0xB4 => (AddressingMode::ZeroPageX, 4, "LDY"),
+            0xAC => (AddressingMode::Absolute, 4, "LDY"),
+            0xBC => (AddressingMode::AbsoluteX, 4, "LDY"), // +1 cycle if page crossed
+            // STA
+            0x85 => (AddressingMode::ZeroPage, 3, "STA"),
+            0x95 => (AddressingMode::ZeroPageX, 4, "STA"),
+            0x8D => (AddressingMode::Absolute, 4, "STA"),
+            0x9D => (AddressingMode::AbsoluteX, 5, "STA"), // Writes don't add cycle on page cross
+            0x99 => (AddressingMode::AbsoluteY, 5, "STA"),
+            0x81 => (AddressingMode::IndexedIndirect, 6, "STA"),
+            0x91 => (AddressingMode::IndirectIndexed, 6, "STA"),
+            // STX
+            0x86 => (AddressingMode::ZeroPage, 3, "STX"),
+            0x96 => (AddressingMode::ZeroPageY, 4, "STX"),
+            0x8E => (AddressingMode::Absolute, 4, "STX"),
+            // STY
+            0x84 => (AddressingMode::ZeroPage, 3, "STY"),
+            0x94 => (AddressingMode::ZeroPageX, 4, "STY"),
+            0x8C => (AddressingMode::Absolute, 4, "STY"),
+            // JMP
+            0x4C => (AddressingMode::Absolute, 3, "JMP"),
+            0x6C => (AddressingMode::Indirect, 5, "JMP"),
+            // Branches (Base cycles, +1 if taken, +1 if page crossed)
+            0x10 => (AddressingMode::Relative, 2, "BPL"), 0x30 => (AddressingMode::Relative, 2, "BMI"),
+            0x50 => (AddressingMode::Relative, 2, "BVC"), 0x70 => (AddressingMode::Relative, 2, "BVS"),
+            0x90 => (AddressingMode::Relative, 2, "BCC"), 0xB0 => (AddressingMode::Relative, 2, "BCS"),
+            0xD0 => (AddressingMode::Relative, 2, "BNE"), 0xF0 => (AddressingMode::Relative, 2, "BEQ"),
+            // Other Implied / Accumulator
+            0x18 => (AddressingMode::Implied, 2, "CLC"), 0x38 => (AddressingMode::Implied, 2, "SEC"),
+            0x58 => (AddressingMode::Implied, 2, "CLI"), 0x78 => (AddressingMode::Implied, 2, "SEI"),
+            0xB8 => (AddressingMode::Implied, 2, "CLV"),
+            0xD8 => (AddressingMode::Implied, 2, "CLD"), 0xF8 => (AddressingMode::Implied, 2, "SED"),
+            0xCA => (AddressingMode::Implied, 2, "DEX"), 0x88 => (AddressingMode::Implied, 2, "DEY"),
+            0xE8 => (AddressingMode::Implied, 2, "INX"), 0xC8 => (AddressingMode::Implied, 2, "INY"),
+            0xAA => (AddressingMode::Implied, 2, "TAX"), 0xA8 => (AddressingMode::Implied, 2, "TAY"),
+            0xBA => (AddressingMode::Implied, 2, "TSX"), 0x8A => (AddressingMode::Implied, 2, "TXA"),
+            0x9A => (AddressingMode::Implied, 2, "TXS"), 0x98 => (AddressingMode::Implied, 2, "TYA"),
+            // Stack
+            0x48 => (AddressingMode::Implied, 3, "PHA"), 0x08 => (AddressingMode::Implied, 3, "PHP"),
+            0x68 => (AddressingMode::Implied, 4, "PLA"), 0x28 => (AddressingMode::Implied, 4, "PLP"),
+            // JSR / RTS / RTI
+            0x20 => (AddressingMode::Absolute, 6, "JSR"),
+            0x60 => (AddressingMode::Implied, 6, "RTS"),
+            0x40 => (AddressingMode::Implied, 6, "RTI"),
+            // Arithmetic & Compare (Immediate)
+            0x69 => (AddressingMode::Immediate, 2, "ADC"), 0xE9 => (AddressingMode::Immediate, 2, "SBC"),
+            0xC9 => (AddressingMode::Immediate, 2, "CMP"),
+            0xE0 => (AddressingMode::Immediate, 2, "CPX"), 0xC0 => (AddressingMode::Immediate, 2, "CPY"),
+            // AND, EOR, ORA (Immediate)
+            0x29 => (AddressingMode::Immediate, 2, "AND"), 0x49 => (AddressingMode::Immediate, 2, "EOR"),
+            0x09 => (AddressingMode::Immediate, 2, "ORA"),
+             // BIT
+             0x24 => (AddressingMode::ZeroPage, 3, "BIT"),
+             0x2C => (AddressingMode::Absolute, 4, "BIT"),
+             // ASL, LSR, ROL, ROR (Accumulator & Memory)
+             0x0A => (AddressingMode::Accumulator, 2, "ASL"), 0x06 => (AddressingMode::ZeroPage, 5, "ASL"),
+             0x16 => (AddressingMode::ZeroPageX, 6, "ASL"), 0x0E => (AddressingMode::Absolute, 6, "ASL"),
+             0x1E => (AddressingMode::AbsoluteX, 7, "ASL"),
+             0x4A => (AddressingMode::Accumulator, 2, "LSR"), 0x46 => (AddressingMode::ZeroPage, 5, "LSR"),
+             0x56 => (AddressingMode::ZeroPageX, 6, "LSR"), 0x4E => (AddressingMode::Absolute, 6, "LSR"),
+             0x5E => (AddressingMode::AbsoluteX, 7, "LSR"),
+             0x2A => (AddressingMode::Accumulator, 2, "ROL"), 0x26 => (AddressingMode::ZeroPage, 5, "ROL"),
+             0x36 => (AddressingMode::ZeroPageX, 6, "ROL"), 0x2E => (AddressingMode::Absolute, 6, "ROL"),
+             0x3E => (AddressingMode::AbsoluteX, 7, "ROL"),
+             0x6A => (AddressingMode::Accumulator, 2, "ROR"), 0x66 => (AddressingMode::ZeroPage, 5, "ROR"),
+             0x76 => (AddressingMode::ZeroPageX, 6, "ROR"), 0x6E => (AddressingMode::Absolute, 6, "ROR"),
+             0x7E => (AddressingMode::AbsoluteX, 7, "ROR"),
+             // INC, DEC (Memory)
+             0xE6 => (AddressingMode::ZeroPage, 5, "INC"), 0xF6 => (AddressingMode::ZeroPageX, 6, "INC"),
+             0xEE => (AddressingMode::Absolute, 6, "INC"), 0xFE => (AddressingMode::AbsoluteX, 7, "INC"),
+             0xC6 => (AddressingMode::ZeroPage, 5, "DEC"), 0xD6 => (AddressingMode::ZeroPageX, 6, "DEC"),
+             0xCE => (AddressingMode::Absolute, 6, "DEC"), 0xDE => (AddressingMode::AbsoluteX, 7, "DEC"),
+             // ADC, SBC, CMP (Memory - more modes)
+             0x65 => (AddressingMode::ZeroPage, 3, "ADC"), 0x75 => (AddressingMode::ZeroPageX, 4, "ADC"),
+             0x6D => (AddressingMode::Absolute, 4, "ADC"), 0x7D => (AddressingMode::AbsoluteX, 4, "ADC"), //+1
+             0x79 => (AddressingMode::AbsoluteY, 4, "ADC"), //+1
+             0x61 => (AddressingMode::IndexedIndirect, 6, "ADC"), 0x71 => (AddressingMode::IndirectIndexed, 5, "ADC"), //+1
+             0xE5 => (AddressingMode::ZeroPage, 3, "SBC"), 0xF5 => (AddressingMode::ZeroPageX, 4, "SBC"),
+             0xED => (AddressingMode::Absolute, 4, "SBC"), 0xFD => (AddressingMode::AbsoluteX, 4, "SBC"), //+1
+             0xF9 => (AddressingMode::AbsoluteY, 4, "SBC"), //+1
+             0xE1 => (AddressingMode::IndexedIndirect, 6, "SBC"), 0xF1 => (AddressingMode::IndirectIndexed, 5, "SBC"), //+1
+             0xC5 => (AddressingMode::ZeroPage, 3, "CMP"), 0xD5 => (AddressingMode::ZeroPageX, 4, "CMP"),
+             0xCD => (AddressingMode::Absolute, 4, "CMP"), 0xDD => (AddressingMode::AbsoluteX, 4, "CMP"), //+1
+             0xD9 => (AddressingMode::AbsoluteY, 4, "CMP"), //+1
+             0xC1 => (AddressingMode::IndexedIndirect, 6, "CMP"), 0xD1 => (AddressingMode::IndirectIndexed, 5, "CMP"), //+1
+             0xE4 => (AddressingMode::ZeroPage, 3, "CPX"), 0xEC => (AddressingMode::Absolute, 4, "CPX"),
+             0xC4 => (AddressingMode::ZeroPage, 3, "CPY"), 0xCC => (AddressingMode::Absolute, 4, "CPY"),
+             // AND, ORA, EOR (Memory - more modes)
+             0x25 => (AddressingMode::ZeroPage, 3, "AND"), 0x35 => (AddressingMode::ZeroPageX, 4, "AND"),
+             0x2D => (AddressingMode::Absolute, 4, "AND"), 0x3D => (AddressingMode::AbsoluteX, 4, "AND"), //+1
+             0x39 => (AddressingMode::AbsoluteY, 4, "AND"), //+1
+             0x21 => (AddressingMode::IndexedIndirect, 6, "AND"), 0x31 => (AddressingMode::IndirectIndexed, 5, "AND"), //+1
+             0x05 => (AddressingMode::ZeroPage, 3, "ORA"), 0x15 => (AddressingMode::ZeroPageX, 4, "ORA"),
+             0x0D => (AddressingMode::Absolute, 4, "ORA"), 0x1D => (AddressingMode::AbsoluteX, 4, "ORA"), //+1
+             0x19 => (AddressingMode::AbsoluteY, 4, "ORA"), //+1
+             0x01 => (AddressingMode::IndexedIndirect, 6, "ORA"), 0x11 => (AddressingMode::IndirectIndexed, 5, "ORA"), //+1
+             0x45 => (AddressingMode::ZeroPage, 3, "EOR"), 0x55 => (AddressingMode::ZeroPageX, 4, "EOR"),
+             0x4D => (AddressingMode::Absolute, 4, "EOR"), 0x5D => (AddressingMode::AbsoluteX, 4, "EOR"), //+1
+             0x59 => (AddressingMode::AbsoluteY, 4, "EOR"), //+1
+             0x41 => (AddressingMode::IndexedIndirect, 6, "EOR"), 0x51 => (AddressingMode::IndirectIndexed, 5, "EOR"), //+1
+
+             // --- Unofficial Opcodes (Adding placeholder cycles) ---
+             // KIL/HLT/JAM (Treated as NOP for now)
+             0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 |
+             0x92 | 0xB2 | 0xD2 | 0xF2 => (AddressingMode::Implied, 2, "KIL*"),
+             // SLO (ASO) = ASL operand + ORA operand
+             0x07 => (AddressingMode::ZeroPage, 5, "SLO*"), 0x17 => (AddressingMode::ZeroPageX, 6, "SLO*"),
+             0x0F => (AddressingMode::Absolute, 6, "SLO*"), 0x1F => (AddressingMode::AbsoluteX, 7, "SLO*"),
+             0x1B => (AddressingMode::AbsoluteY, 7, "SLO*"),
+             0x03 => (AddressingMode::IndexedIndirect, 8, "SLO*"), 0x13 => (AddressingMode::IndirectIndexed, 8, "SLO*"),
+             // RLA = ROL operand + AND operand
+             0x27 => (AddressingMode::ZeroPage, 5, "RLA*"), 0x37 => (AddressingMode::ZeroPageX, 6, "RLA*"),
+             0x2F => (AddressingMode::Absolute, 6, "RLA*"), 0x3F => (AddressingMode::AbsoluteX, 7, "RLA*"),
+             0x3B => (AddressingMode::AbsoluteY, 7, "RLA*"),
+             0x23 => (AddressingMode::IndexedIndirect, 8, "RLA*"), 0x33 => (AddressingMode::IndirectIndexed, 8, "RLA*"),
+             // SRE (LSE) = LSR operand + EOR operand
+             0x47 => (AddressingMode::ZeroPage, 5, "SRE*"), 0x57 => (AddressingMode::ZeroPageX, 6, "SRE*"),
+             0x4F => (AddressingMode::Absolute, 6, "SRE*"), 0x5F => (AddressingMode::AbsoluteX, 7, "SRE*"),
+             0x5B => (AddressingMode::AbsoluteY, 7, "SRE*"),
+             0x43 => (AddressingMode::IndexedIndirect, 8, "SRE*"), 0x53 => (AddressingMode::IndirectIndexed, 8, "SRE*"),
+             // RRA = ROR operand + ADC operand
+             0x67 => (AddressingMode::ZeroPage, 5, "RRA*"), 0x77 => (AddressingMode::ZeroPageX, 6, "RRA*"),
+             0x6F => (AddressingMode::Absolute, 6, "RRA*"), 0x7F => (AddressingMode::AbsoluteX, 7, "RRA*"),
+             0x7B => (AddressingMode::AbsoluteY, 7, "RRA*"),
+             0x63 => (AddressingMode::IndexedIndirect, 8, "RRA*"), 0x73 => (AddressingMode::IndirectIndexed, 8, "RRA*"),
+             // SAX (AXS) = Store A & X
+             0x87 => (AddressingMode::ZeroPage, 3, "SAX*"), 0x97 => (AddressingMode::ZeroPageY, 4, "SAX*"),
+             0x8F => (AddressingMode::Absolute, 4, "SAX*"),
+             0x83 => (AddressingMode::IndexedIndirect, 6, "SAX*"),
+             // LAX = LDA operand + LDX operand
+             0xA7 => (AddressingMode::ZeroPage, 3, "LAX*"), 0xB7 => (AddressingMode::ZeroPageY, 4, "LAX*"),
+             0xAF => (AddressingMode::Absolute, 4, "LAX*"), 0xBF => (AddressingMode::AbsoluteY, 4, "LAX*"), //+1
+             0xA3 => (AddressingMode::IndexedIndirect, 6, "LAX*"), 0xB3 => (AddressingMode::IndirectIndexed, 5, "LAX*"), //+1
+             // DCP (DCM) = DEC operand + CMP operand
+             0xC7 => (AddressingMode::ZeroPage, 5, "DCP*"), 0xD7 => (AddressingMode::ZeroPageX, 6, "DCP*"),
+             0xCF => (AddressingMode::Absolute, 6, "DCP*"), 0xDF => (AddressingMode::AbsoluteX, 7, "DCP*"),
+             0xDB => (AddressingMode::AbsoluteY, 7, "DCP*"),
+             0xC3 => (AddressingMode::IndexedIndirect, 8, "DCP*"), 0xD3 => (AddressingMode::IndirectIndexed, 8, "DCP*"),
+             // ISC (ISB, INS) = INC operand + SBC operand
+             0xE7 => (AddressingMode::ZeroPage, 5, "ISC*"), 0xF7 => (AddressingMode::ZeroPageX, 6, "ISC*"),
+             0xEF => (AddressingMode::Absolute, 6, "ISC*"), 0xFF => (AddressingMode::AbsoluteX, 7, "ISC*"),
+             0xFB => (AddressingMode::AbsoluteY, 7, "ISC*"),
+             0xE3 => (AddressingMode::IndexedIndirect, 8, "ISC*"), 0xF3 => (AddressingMode::IndirectIndexed, 8, "ISC*"),
+             // NOPs (unofficial)
+             0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => (AddressingMode::Implied, 2, "NOP*"),
+             0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => (AddressingMode::Immediate, 2, "NOP*"),
+             0x04 | 0x44 | 0x64 => (AddressingMode::ZeroPage, 3, "NOP*"),
+             0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => (AddressingMode::ZeroPageX, 4, "NOP*"),
+             0x0C => (AddressingMode::Absolute, 4, "NOP*"),
+             0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => (AddressingMode::AbsoluteX, 4, "NOP*"), //+1?
+
+             _ => (AddressingMode::Implied, 2, "???"), // Default placeholder for unknown/unimplemented official opcodes
+        }
+    }
+
+    // --- Restore calculate_effective_address --- ★★★ Fix unused vars ★★★
+    fn calculate_effective_address(&mut self, bus: &impl BusAccess, mode: AddressingMode) -> (u16, u8) {
+        let mut addr: u16 = 0;
+        // Remove unused page_crossed variable
+        // let page_crossed = false;
+        let mut extra_cycles: u8 = 0; // Renamed for clarity, will be returned
+
         match mode {
+            AddressingMode::Implied | AddressingMode::Accumulator => {}
             AddressingMode::Immediate => {
-                let addr = self.registers.program_counter;
+                addr = self.registers.program_counter;
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                addr // Address of the immediate value itself
             }
             AddressingMode::ZeroPage => {
-                let addr = self.read(bus, self.registers.program_counter) as u16;
+                addr = bus.read(self.registers.program_counter) as u16;
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                addr
             }
             AddressingMode::ZeroPageX => {
-                let base = self.read(bus, self.registers.program_counter);
+                let base = bus.read(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                base.wrapping_add(self.registers.index_x) as u16
+                addr = base.wrapping_add(self.registers.x_register) as u16;
             }
             AddressingMode::ZeroPageY => {
-                let base = self.read(bus, self.registers.program_counter);
+                let base = bus.read(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                base.wrapping_add(self.registers.index_y) as u16
+                addr = base.wrapping_add(self.registers.y_register) as u16;
             }
             AddressingMode::Absolute => {
-                let addr = self.read_u16(bus, self.registers.program_counter);
+                addr = bus.read_u16(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(2);
-                addr
             }
             AddressingMode::AbsoluteX => {
-                let base = self.read_u16(bus, self.registers.program_counter);
+                let base = bus.read_u16(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(2);
-                // TODO: Add cycle penalty if page crossed
-                base.wrapping_add(self.registers.index_x as u16)
+                addr = base.wrapping_add(self.registers.x_register as u16);
+                if (base & 0xFF00) != (addr & 0xFF00) {
+                    extra_cycles = 1; // Set extra_cycles if page crossed
+                }
             }
             AddressingMode::AbsoluteY => {
-                let base = self.read_u16(bus, self.registers.program_counter);
+                let base = bus.read_u16(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(2);
-                // TODO: Add cycle penalty if page crossed
-                base.wrapping_add(self.registers.index_y as u16)
+                addr = base.wrapping_add(self.registers.y_register as u16);
+                 if (base & 0xFF00) != (addr & 0xFF00) {
+                     extra_cycles = 1; // Set extra_cycles if page crossed
+                 }
             }
             AddressingMode::Indirect => { // Only used by JMP
-                let ptr_addr = self.read_u16(bus, self.registers.program_counter);
+                let ptr_addr = bus.read_u16(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(2);
-                // Replicate 6502 bug: if low byte is FF, high byte wraps without incrementing page
-                let effective_addr = if ptr_addr & 0x00FF == 0x00FF {
-                    let lo = self.read(bus, ptr_addr) as u16;
-                    let hi = self.read(bus, ptr_addr & 0xFF00) as u16; // Read from same page
+                // Handle 6502 indirect JMP bug: if the low byte of the address is $FF,
+                // the high byte is fetched from $xx00 instead of $xxFF + 1.
+                addr = if ptr_addr & 0x00FF == 0x00FF {
+                    let lo = bus.read(ptr_addr) as u16;
+                    let hi = bus.read(ptr_addr & 0xFF00) as u16; // Read from $xx00
                     (hi << 8) | lo
                 } else {
-                    self.read_u16(bus, ptr_addr)
+                    bus.read_u16(ptr_addr) // Normal read
                 };
-                effective_addr
             }
-            AddressingMode::IndexedIndirect => { // (Indirect, X)
-                let base = self.read(bus, self.registers.program_counter);
+            AddressingMode::IndexedIndirect => { // (Indirect, X) - Pre-indexed indirect
+                let base_ptr_addr = bus.read(self.registers.program_counter);
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                let ptr = base.wrapping_add(self.registers.index_x);
-                let lo = self.read(bus, ptr as u16) as u16;
-                let hi = self.read(bus, ptr.wrapping_add(1) as u16) as u16;
-                (hi << 8) | lo
+                // Address is calculated as (base_ptr_addr + X) % 0x100 (zero page wrap around)
+                let ptr_addr = base_ptr_addr.wrapping_add(self.registers.x_register) as u16;
+                // Read the effective address from the zero page pointer address
+                addr = bus.read_u16_zp(ptr_addr); // Use zero-page wrap-around read for the pointer
             }
-            AddressingMode::IndirectIndexed => { // (Indirect), Y
-                let base = self.read(bus, self.registers.program_counter);
+            AddressingMode::IndirectIndexed => { // (Indirect), Y - Indirect post-indexed
+                let base_ptr_addr = bus.read(self.registers.program_counter) as u16;
                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                let lo = self.read(bus, base as u16) as u16;
-                let hi = self.read(bus, base.wrapping_add(1) as u16) as u16;
-                let ptr_addr = (hi << 8) | lo;
-                // TODO: Add cycle penalty if page crossed
-                ptr_addr.wrapping_add(self.registers.index_y as u16)
+                // Read the base address from the zero page pointer
+                let base_addr = bus.read_u16_zp(base_ptr_addr); // Use zero-page wrap-around read for the pointer
+                // Add Y register to the base address
+                addr = base_addr.wrapping_add(self.registers.y_register as u16);
+                 if (base_addr & 0xFF00) != (addr & 0xFF00) {
+                    extra_cycles = 1; // Set extra_cycles if page crossed
+                 }
             }
-            AddressingMode::Relative => {
-                let offset = self.read(bus, self.registers.program_counter) as i8; // Read offset as signed i8
-                self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-                // Calculate target address relative to the *next* instruction's address
-                self.registers.program_counter.wrapping_add(offset as u16) // wrapping_add handles signed addition correctly
-            }
-            // These modes don't produce an address in the same way
-            AddressingMode::Implied | AddressingMode::Accumulator => {
-                panic!("Implied/Accumulator mode should not call get_operand_address");
-                // Or return a dummy value like 0, but the instruction logic must handle it.
+            AddressingMode::Relative => { // Branches
+                 let offset = bus.read(self.registers.program_counter) as i8;
+                 self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
+                 // Address calculation doesn't add cycles itself, handled by branch logic
+                 addr = self.registers.program_counter.wrapping_add(offset as u16);
             }
         }
+        (addr, extra_cycles) // Return address and calculated extra cycles
     }
 
-    // Helper to fetch operand based on addressing mode
-    fn fetch_operand(&mut self, bus: &mut Bus, mode: AddressingMode) -> u8 { // Takes &mut Bus
-        match mode {
-            AddressingMode::Accumulator => self.registers.accumulator,
-            AddressingMode::Immediate => {
-                let addr = self.get_operand_address(bus, mode); // Get address (advances PC)
-                self.read(bus, addr) // Now read using the address
-            }
-            _ => {
-                let addr = self.get_operand_address(bus, mode); // Pass bus
-                self.read(bus, addr) // Pass bus
-            }
-        }
-    }
-
-
-    // --- Instruction Implementations ---
-
-    // ADC - Add with Carry
-    fn adc(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        let carry = (self.registers.status & FLAG_CARRY) as u16;
-        let result = self.registers.accumulator as u16 + operand as u16 + carry;
-
-        // Set Carry flag
-        if result > 0xFF { self.registers.status |= FLAG_CARRY; } else { self.registers.status &= !FLAG_CARRY; }
-
-        // Set Overflow flag
-        if (self.registers.accumulator ^ (result as u8)) & (operand ^ (result as u8)) & FLAG_NEGATIVE != 0 {
-            self.registers.status |= FLAG_OVERFLOW;
-        } else {
-            self.registers.status &= !FLAG_OVERFLOW;
-        }
-
-        self.registers.accumulator = result as u8;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-
-    // AND - Logical AND
-    fn and(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        self.registers.accumulator &= operand;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-
-    // ASL - Arithmetic Shift Left
-    fn asl(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let value = match mode {
-            AddressingMode::Accumulator => {
-                let acc = self.registers.accumulator;
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | ((acc & FLAG_NEGATIVE) >> 7); // Old bit 7 to Carry
-                self.registers.accumulator = acc << 1;
+    // --- Execute Instruction (Fix Borrowing) ---
+    fn execute_instruction(&mut self, bus: &mut impl BusAccess, opcode: u8, addr: u16, mode: AddressingMode, current_pc: u16) -> u8 {
+        let mut _extra_cycles = 0;
+        
+        // Helper to fetch operand value based on addressing mode
+        let operand_value = if mode == AddressingMode::Immediate {
+                bus.read(addr)
+            } else if mode == AddressingMode::Accumulator {
                 self.registers.accumulator
-            }
-            _ => {
-                let addr = self.get_operand_address(bus, mode); // Pass bus
-                let operand = self.read(bus, addr); // Pass bus
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | ((operand & FLAG_NEGATIVE) >> 7); // Old bit 7 to Carry
-                let result = operand << 1;
-                self.write(bus, addr, result); // Pass bus
-                result
-            }
-        };
-        self.update_nz_flags(value);
-    }
+            } else if mode != AddressingMode::Implied && mode != AddressingMode::Relative {
+                bus.read(addr) // Read from memory
+            } else {
+                0 // Implied/Relative doesn't read operand this way
+            };
+            // --- Side effect triggers moved AFTER instruction logic ---
 
-    // Branching helper
-    fn branch(&mut self, bus: &mut Bus, condition: bool, mode: AddressingMode) { // Takes &mut Bus
-         if condition {
-            let target_addr = self.get_operand_address(bus, mode); // Pass bus
-            // TODO: Add cycle penalty if page boundary is crossed
-            self.registers.program_counter = target_addr;
-        } else {
-             // Consume the relative offset byte even if branch not taken
-             let _offset = self.read(bus, self.registers.program_counter); // Pass bus
-             self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
-        }
-    }
-
-    // BCC - Branch if Carry Clear
-    fn bcc(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_CARRY == 0, mode); // Pass bus
-    }
-    // BCS - Branch if Carry Set
-    fn bcs(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_CARRY != 0, mode); // Pass bus
-    }
-    // BEQ - Branch if Equal (Zero flag set)
-    fn beq(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_ZERO != 0, mode); // Pass bus
-    }
-    // BNE - Branch if Not Equal (Zero flag clear)
-    fn bne(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_ZERO == 0, mode); // Pass bus
-    }
-    // BMI - Branch if Minus (Negative flag set)
-    fn bmi(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_NEGATIVE != 0, mode); // Pass bus
-    }
-    // BPL - Branch if Positive (Negative flag clear)
-    fn bpl(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_NEGATIVE == 0, mode); // Pass bus
-    }
-    // BVC - Branch if Overflow Clear
-    fn bvc(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_OVERFLOW == 0, mode); // Pass bus
-    }
-    // BVS - Branch if Overflow Set
-    fn bvs(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.branch(bus, self.registers.status & FLAG_OVERFLOW != 0, mode); // Pass bus
-    }
-
-    // BIT - Test Bits
-    fn bit(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        // Zero flag: set if result of A & M is zero
-        if self.registers.accumulator & operand == 0 { self.registers.status |= FLAG_ZERO; } else { self.registers.status &= !FLAG_ZERO; }
-        // Negative flag: set to bit 7 of M
-        if operand & FLAG_NEGATIVE != 0 { self.registers.status |= FLAG_NEGATIVE; } else { self.registers.status &= !FLAG_NEGATIVE; }
-        // Overflow flag: set to bit 6 of M
-        if operand & FLAG_OVERFLOW != 0 { self.registers.status |= FLAG_OVERFLOW; } else { self.registers.status &= !FLAG_OVERFLOW; }
-    }
-
-    // BRK - Force Interrupt
-    fn brk(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Signature correct
-        self.registers.program_counter = self.registers.program_counter.wrapping_add(1); // BRK has a padding byte
-        self.push(bus, (self.registers.program_counter >> 8) as u8); // Pass bus
-        self.push(bus, self.registers.program_counter as u8); // Pass bus
-        let status_with_break = self.registers.status | FLAG_BREAK | FLAG_UNUSED;
-        self.push(bus, status_with_break); // Pass bus
-        self.registers.status |= INTERRUPT_DISABLE_FLAG; // Set interrupt disable flag
-        self.registers.program_counter = self.read_u16(bus, 0xFFFE); // Load IRQ vector, Pass bus
-    }
-
-    // CLC - Clear Carry Flag
-    fn clc(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status &= !FLAG_CARRY;
-    }
-    // CLD - Clear Decimal Mode Flag (No-op on NES)
-    fn cld(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status &= !DECIMAL_MODE_FLAG;
-    }
-    // CLI - Clear Interrupt Disable Flag
-    fn cli(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status &= !INTERRUPT_DISABLE_FLAG;
-    }
-    // CLV - Clear Overflow Flag
-    fn clv(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status &= !FLAG_OVERFLOW;
-    }
-
-    // Compare helper (doesn't need bus access)
-    fn compare(&mut self, register_value: u8, memory_value: u8) {
-        let result = register_value.wrapping_sub(memory_value);
-        if register_value >= memory_value { self.registers.status |= FLAG_CARRY; } else { self.registers.status &= !FLAG_CARRY; }
-        self.update_nz_flags(result);
-    }
-    // CMP - Compare Accumulator
-    fn cmp(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        self.compare(self.registers.accumulator, operand);
-    }
-    // CPX - Compare X Register
-    fn cpx(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        self.compare(self.registers.index_x, operand);
-    }
-    // CPY - Compare Y Register
-    fn cpy(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        self.compare(self.registers.index_y, operand);
-    }
-
-    // DEC - Decrement Memory
-    fn dec(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let addr = self.get_operand_address(bus, mode); // Pass bus
-        let value = self.read(bus, addr).wrapping_sub(1); // Pass bus
-        self.write(bus, addr, value); // Pass bus
-        self.update_nz_flags(value);
-    }
-    // DEX - Decrement X Register
-    fn dex(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_x = self.registers.index_x.wrapping_sub(1);
-        self.update_nz_flags(self.registers.index_x);
-    }
-    // DEY - Decrement Y Register
-    fn dey(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_y = self.registers.index_y.wrapping_sub(1);
-        self.update_nz_flags(self.registers.index_y);
-    }
-
-    // EOR - Exclusive OR
-    fn eor(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        self.registers.accumulator ^= operand;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-
-    // INC - Increment Memory
-    fn inc(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let addr = self.get_operand_address(bus, mode); // Pass bus
-        let value = self.read(bus, addr).wrapping_add(1); // Pass bus
-        self.write(bus, addr, value); // Pass bus
-        self.update_nz_flags(value);
-    }
-    // INX - Increment X Register
-    fn inx(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_x = self.registers.index_x.wrapping_add(1);
-        self.update_nz_flags(self.registers.index_x);
-    }
-    // INY - Increment Y Register
-    fn iny(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_y = self.registers.index_y.wrapping_add(1);
-        self.update_nz_flags(self.registers.index_y);
-    }
-
-    // JMP - Jump
-    fn jmp(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        self.registers.program_counter = self.get_operand_address(bus, mode); // Pass bus
-    }
-    // JSR - Jump to Subroutine
-    fn jsr(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let target_addr = self.get_operand_address(bus, mode); // Pass bus
-        let return_addr = self.registers.program_counter - 1; // JSR pushes PC-1
-        self.push(bus, (return_addr >> 8) as u8); // Pass bus
-        self.push(bus, return_addr as u8);       // Pass bus
-        self.registers.program_counter = target_addr;
-    }
-
-    // LDA - Load Accumulator
-    fn lda(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let value = self.fetch_operand(bus, mode); // Pass bus
-        self.registers.accumulator = value;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-    // LDX - Load X Register
-    fn ldx(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let value = self.fetch_operand(bus, mode); // Pass bus
-        self.registers.index_x = value;
-        self.update_nz_flags(self.registers.index_x);
-    }
-    // LDY - Load Y Register
-    fn ldy(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let value = self.fetch_operand(bus, mode); // Pass bus
-        self.registers.index_y = value;
-        self.update_nz_flags(self.registers.index_y);
-    }
-
-    // LSR - Logical Shift Right
-    fn lsr(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-         let value = match mode {
-            AddressingMode::Accumulator => {
-                let acc = self.registers.accumulator;
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | (acc & FLAG_CARRY); // Old bit 0 to Carry
-                self.registers.accumulator = acc >> 1;
-                self.registers.accumulator
-            }
-            _ => {
-                let addr = self.get_operand_address(bus, mode); // Pass bus
-                let operand = self.read(bus, addr); // Pass bus
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | (operand & FLAG_CARRY); // Old bit 0 to Carry
-                let result = operand >> 1;
-                self.write(bus, addr, result); // Pass bus
-                result
-            }
-        };
-        self.update_nz_flags(value); // Negative is always 0 after LSR
-        self.registers.status &= !FLAG_NEGATIVE; // Explicitly clear negative flag
-    }
-
-    // NOP - No Operation
-    fn nop(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        // Do nothing
-        // Some unofficial NOPs might consume operands, handle later if needed
-    }
-
-    // ORA - Logical Inclusive OR
-    fn ora(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        self.registers.accumulator |= operand;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-
-    // PHA - Push Accumulator
-    fn pha(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Added mode
-        self.push(bus, self.registers.accumulator); // Pass bus
-    }
-    // PHP - Push Processor Status
-    fn php(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Added mode
-        // Note: Pushed status has Break and Unused flags set
-        let status_with_break = self.registers.status | FLAG_BREAK | FLAG_UNUSED;
-        self.push(bus, status_with_break); // Pass bus
-    }
-    // PLA - Pull Accumulator
-    fn pla(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Added mode
-        self.registers.accumulator = self.pull(bus); // Pass bus
-        self.update_nz_flags(self.registers.accumulator);
-    }
-    // PLP - Pull Processor Status
-    fn plp(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Added mode
-        self.registers.status = self.pull(bus); // Pass bus
-        self.registers.status &= !FLAG_BREAK; // Break flag is ignored when pulled
-        self.registers.status |= FLAG_UNUSED; // Unused flag is always set
-    }
-
-    // ROL - Rotate Left
-    fn rol(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let carry_in = self.registers.status & FLAG_CARRY;
-        let value = match mode {
-            AddressingMode::Accumulator => {
-                let acc = self.registers.accumulator;
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | ((acc & FLAG_NEGATIVE) >> 7); // Old bit 7 to Carry
-                self.registers.accumulator = (acc << 1) | carry_in;
-                self.registers.accumulator
-            }
-            _ => {
-                let addr = self.get_operand_address(bus, mode); // Pass bus
-                let operand = self.read(bus, addr); // Pass bus
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | ((operand & FLAG_NEGATIVE) >> 7); // Old bit 7 to Carry
-                let result = (operand << 1) | carry_in;
-                self.write(bus, addr, result); // Pass bus
-                result
-            }
-        };
-        self.update_nz_flags(value);
-    }
-
-    // ROR - Rotate Right
-    fn ror(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let carry_in = (self.registers.status & FLAG_CARRY) << 7; // Carry to bit 7
-         let value = match mode {
-            AddressingMode::Accumulator => {
-                let acc = self.registers.accumulator;
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | (acc & FLAG_CARRY); // Old bit 0 to Carry
-                self.registers.accumulator = (acc >> 1) | carry_in;
-                self.registers.accumulator
-            }
-            _ => {
-                let addr = self.get_operand_address(bus, mode); // Pass bus
-                let operand = self.read(bus, addr); // Pass bus
-                self.registers.status = (self.registers.status & !FLAG_CARRY) | (operand & FLAG_CARRY); // Old bit 0 to Carry
-                let result = (operand >> 1) | carry_in;
-                self.write(bus, addr, result); // Pass bus
-                result
-            }
-        };
-        self.update_nz_flags(value);
-    }
-
-    // RTI - Return from Interrupt
-    fn rti(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Added mode
-        self.plp(bus, AddressingMode::Implied); // Pass bus
-        let lo = self.pull(bus) as u16; // Pass bus
-        let hi = self.pull(bus) as u16; // Pass bus
-        self.registers.program_counter = (hi << 8) | lo;
-    }
-
-    // RTS - Return from Subroutine
-    fn rts(&mut self, bus: &mut Bus, _mode: AddressingMode) { // Added mode
-        let lo = self.pull(bus) as u16; // Pass bus
-        let hi = self.pull(bus) as u16; // Pass bus
-        self.registers.program_counter = ((hi << 8) | lo).wrapping_add(1); // RTS pulls PC-1, add 1
-    }
-
-    // SBC - Subtract with Carry
-    fn sbc(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        // SBC is effectively ADC with the operand bitwise inverted
-        let operand = self.fetch_operand(bus, mode); // Pass bus
-        let inverted_operand = !operand;
-
-        let carry = (self.registers.status & FLAG_CARRY) as u16; // Carry acts as NOT borrow
-        let result = self.registers.accumulator as u16 + inverted_operand as u16 + carry;
-
-        // Set Carry flag (Set if no borrow occurred, i.e., result >= 0x100)
-        if result > 0xFF { self.registers.status |= FLAG_CARRY; } else { self.registers.status &= !FLAG_CARRY; }
-
-        // Set Overflow flag
-        if (self.registers.accumulator ^ (result as u8)) & (inverted_operand ^ (result as u8)) & FLAG_NEGATIVE != 0 {
-            self.registers.status |= FLAG_OVERFLOW;
-        } else {
-            self.registers.status &= !FLAG_OVERFLOW;
-        }
-
-        self.registers.accumulator = result as u8;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-
-    // SEC - Set Carry Flag
-    fn sec(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status |= FLAG_CARRY;
-    }
-    // SED - Set Decimal Mode Flag (No-op on NES)
-    fn sed(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status |= DECIMAL_MODE_FLAG;
-    }
-    // SEI - Set Interrupt Disable Flag
-    fn sei(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.status |= INTERRUPT_DISABLE_FLAG;
-    }
-
-    // STA - Store Accumulator
-    fn sta(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let addr = self.get_operand_address(bus, mode); // Pass bus
-        self.write(bus, addr, self.registers.accumulator); // Pass bus
-    }
-    // STX - Store X Register
-    fn stx(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let addr = self.get_operand_address(bus, mode); // Pass bus
-        self.write(bus, addr, self.registers.index_x); // Pass bus
-    }
-    // STY - Store Y Register
-    fn sty(&mut self, bus: &mut Bus, mode: AddressingMode) { // Changed memory to bus
-        let addr = self.get_operand_address(bus, mode); // Pass bus
-        self.write(bus, addr, self.registers.index_y); // Pass bus
-    }
-
-    // TAX - Transfer Accumulator to X
-    fn tax(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_x = self.registers.accumulator;
-        self.update_nz_flags(self.registers.index_x);
-    }
-    // TAY - Transfer Accumulator to Y
-    fn tay(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_y = self.registers.accumulator;
-        self.update_nz_flags(self.registers.index_y);
-    }
-    // TSX - Transfer Stack Pointer to X
-    fn tsx(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.index_x = self.registers.stack_pointer;
-        self.update_nz_flags(self.registers.index_x);
-    }
-    // TXA - Transfer X to Accumulator
-    fn txa(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.accumulator = self.registers.index_x;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-    // TXS - Transfer X to Stack Pointer
-    fn txs(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.stack_pointer = self.registers.index_x;
-        // TXS does not update flags
-    }
-    // TYA - Transfer Y to Accumulator
-    fn tya(&mut self, _bus: &mut Bus, _mode: AddressingMode) { // Changed memory to bus (ignored), added mode
-        self.registers.accumulator = self.registers.index_y;
-        self.update_nz_flags(self.registers.accumulator);
-    }
-
-    // --- Undocumented Opcodes ---
-    // Implement later if needed (e.g., LAX, SAX, DCP, ISB, SLO, RLA, SRE, RRA)
-    fn lax(&mut self, bus: &mut Bus, mode: AddressingMode) { /* Treat as NOP for now */ self.nop(bus, mode); } // Added mode
-    fn sax(&mut self, bus: &mut Bus, mode: AddressingMode) { /* Treat as NOP for now */ self.nop(bus, mode); } // Added mode
-    // ... and so on
-
-
-    // --- Execution Cycle ---
-    // Executes a single CPU instruction. Returns the number of cycles consumed.
-    pub fn step(&mut self, bus: &mut Bus) -> u8 {
-        let pc_before = self.registers.program_counter;
-        self.opcode = self.read(bus, pc_before);
-        self.registers.program_counter = pc_before.wrapping_add(1);
-
-        // Decode opcode to get addressing mode, base cycles, and instruction function
-        // This needs a full lookup table or match statement
-        let (mode, base_cycles, instruction_fn) : (AddressingMode, u8, fn(&mut Cpu6502, &mut Bus, AddressingMode)) = match self.opcode {
-            // --- Official Opcodes --- 
-            // ADC
-            0x69 => (AddressingMode::Immediate, 2, Self::adc), 0x65 => (AddressingMode::ZeroPage, 3, Self::adc), 0x75 => (AddressingMode::ZeroPageX, 4, Self::adc),
-            0x6D => (AddressingMode::Absolute, 4, Self::adc), 0x7D => (AddressingMode::AbsoluteX, 4, Self::adc), 0x79 => (AddressingMode::AbsoluteY, 4, Self::adc),
-            0x61 => (AddressingMode::IndexedIndirect, 6, Self::adc), 0x71 => (AddressingMode::IndirectIndexed, 5, Self::adc),
-            // AND
-            0x29 => (AddressingMode::Immediate, 2, Self::and), 0x25 => (AddressingMode::ZeroPage, 3, Self::and), 0x35 => (AddressingMode::ZeroPageX, 4, Self::and),
-            0x2D => (AddressingMode::Absolute, 4, Self::and), 0x3D => (AddressingMode::AbsoluteX, 4, Self::and), 0x39 => (AddressingMode::AbsoluteY, 4, Self::and),
-            0x21 => (AddressingMode::IndexedIndirect, 6, Self::and), 0x31 => (AddressingMode::IndirectIndexed, 5, Self::and),
-            // ASL
-            0x0A => (AddressingMode::Accumulator, 2, Self::asl), 0x06 => (AddressingMode::ZeroPage, 5, Self::asl), 0x16 => (AddressingMode::ZeroPageX, 6, Self::asl),
-            0x0E => (AddressingMode::Absolute, 6, Self::asl), 0x1E => (AddressingMode::AbsoluteX, 7, Self::asl),
-            // Branch Instructions
-            0x90 => (AddressingMode::Relative, 2, Self::bcc), 0xB0 => (AddressingMode::Relative, 2, Self::bcs), 0xF0 => (AddressingMode::Relative, 2, Self::beq),
-            0x30 => (AddressingMode::Relative, 2, Self::bmi), 0xD0 => (AddressingMode::Relative, 2, Self::bne), 0x10 => (AddressingMode::Relative, 2, Self::bpl),
-            0x50 => (AddressingMode::Relative, 2, Self::bvc), 0x70 => (AddressingMode::Relative, 2, Self::bvs),
-            // BIT
-            0x24 => (AddressingMode::ZeroPage, 3, Self::bit), 0x2C => (AddressingMode::Absolute, 4, Self::bit),
-            // BRK
-            0x00 => (AddressingMode::Implied, 7, Self::brk),
-            // Flag Instructions (Implied)
-            0x18 => (AddressingMode::Implied, 2, Self::clc), 0xD8 => (AddressingMode::Implied, 2, Self::cld), 0x58 => (AddressingMode::Implied, 2, Self::cli),
-            0xB8 => (AddressingMode::Implied, 2, Self::clv), 0x38 => (AddressingMode::Implied, 2, Self::sec), 0xF8 => (AddressingMode::Implied, 2, Self::sed),
-            0x78 => (AddressingMode::Implied, 2, Self::sei),
-            // CMP
-            0xC9 => (AddressingMode::Immediate, 2, Self::cmp), 0xC5 => (AddressingMode::ZeroPage, 3, Self::cmp), 0xD5 => (AddressingMode::ZeroPageX, 4, Self::cmp),
-            0xCD => (AddressingMode::Absolute, 4, Self::cmp), 0xDD => (AddressingMode::AbsoluteX, 4, Self::cmp), 0xD9 => (AddressingMode::AbsoluteY, 4, Self::cmp),
-            0xC1 => (AddressingMode::IndexedIndirect, 6, Self::cmp), 0xD1 => (AddressingMode::IndirectIndexed, 5, Self::cmp),
-            // CPX
-            0xE0 => (AddressingMode::Immediate, 2, Self::cpx), 0xE4 => (AddressingMode::ZeroPage, 3, Self::cpx), 0xEC => (AddressingMode::Absolute, 4, Self::cpx),
-            // CPY
-            0xC0 => (AddressingMode::Immediate, 2, Self::cpy), 0xC4 => (AddressingMode::ZeroPage, 3, Self::cpy), 0xCC => (AddressingMode::Absolute, 4, Self::cpy),
-            // DEC
-            0xC6 => (AddressingMode::ZeroPage, 5, Self::dec), 0xD6 => (AddressingMode::ZeroPageX, 6, Self::dec), 0xCE => (AddressingMode::Absolute, 6, Self::dec), 0xDE => (AddressingMode::AbsoluteX, 7, Self::dec),
-            // DEX, DEY (Implied)
-            0xCA => (AddressingMode::Implied, 2, Self::dex), 0x88 => (AddressingMode::Implied, 2, Self::dey),
-            // EOR
-            0x49 => (AddressingMode::Immediate, 2, Self::eor), 0x45 => (AddressingMode::ZeroPage, 3, Self::eor), 0x55 => (AddressingMode::ZeroPageX, 4, Self::eor),
-            0x4D => (AddressingMode::Absolute, 4, Self::eor), 0x5D => (AddressingMode::AbsoluteX, 4, Self::eor), 0x59 => (AddressingMode::AbsoluteY, 4, Self::eor),
-            0x41 => (AddressingMode::IndexedIndirect, 6, Self::eor), 0x51 => (AddressingMode::IndirectIndexed, 5, Self::eor),
-            // INC
-            0xE6 => (AddressingMode::ZeroPage, 5, Self::inc), 0xF6 => (AddressingMode::ZeroPageX, 6, Self::inc), 0xEE => (AddressingMode::Absolute, 6, Self::inc), 0xFE => (AddressingMode::AbsoluteX, 7, Self::inc),
-            // INX, INY (Implied)
-            0xE8 => (AddressingMode::Implied, 2, Self::inx), 0xC8 => (AddressingMode::Implied, 2, Self::iny),
-            // JMP
-            0x4C => (AddressingMode::Absolute, 3, Self::jmp), 0x6C => (AddressingMode::Indirect, 5, Self::jmp),
-            // JSR
-            0x20 => (AddressingMode::Absolute, 6, Self::jsr),
-            // LDA
-            0xA9 => (AddressingMode::Immediate, 2, Self::lda), 0xA5 => (AddressingMode::ZeroPage, 3, Self::lda), 0xB5 => (AddressingMode::ZeroPageX, 4, Self::lda),
-            0xAD => (AddressingMode::Absolute, 4, Self::lda), 0xBD => (AddressingMode::AbsoluteX, 4, Self::lda), 0xB9 => (AddressingMode::AbsoluteY, 4, Self::lda),
-            0xA1 => (AddressingMode::IndexedIndirect, 6, Self::lda), 0xB1 => (AddressingMode::IndirectIndexed, 5, Self::lda),
+        match opcode {
+            // --- Load Instructions ---
+            0xA9 | 0xA5 | 0xB5 | 0xAD | 0xBD | 0xB9 | 0xA1 | 0xB1 => { // LDA
+                let value = operand_value;
+                self.registers.accumulator = value;
+                self.update_nz_flags(value);
+            },
             // LDX
-            0xA2 => (AddressingMode::Immediate, 2, Self::ldx), 0xA6 => (AddressingMode::ZeroPage, 3, Self::ldx), 0xB6 => (AddressingMode::ZeroPageY, 4, Self::ldx),
-            0xAE => (AddressingMode::Absolute, 4, Self::ldx), 0xBE => (AddressingMode::AbsoluteY, 4, Self::ldx),
+            0xA2 | 0xA6 | 0xB6 | 0xAE | 0xBE => { 
+                let value = operand_value;
+                self.registers.x_register = value;
+                self.update_nz_flags(value);
+            },
             // LDY
-            0xA0 => (AddressingMode::Immediate, 2, Self::ldy), 0xA4 => (AddressingMode::ZeroPage, 3, Self::ldy), 0xB4 => (AddressingMode::ZeroPageX, 4, Self::ldy),
-            0xAC => (AddressingMode::Absolute, 4, Self::ldy), 0xBC => (AddressingMode::AbsoluteX, 4, Self::ldy),
-            // LSR
-            0x4A => (AddressingMode::Accumulator, 2, Self::lsr), 0x46 => (AddressingMode::ZeroPage, 5, Self::lsr), 0x56 => (AddressingMode::ZeroPageX, 6, Self::lsr),
-            0x4E => (AddressingMode::Absolute, 6, Self::lsr), 0x5E => (AddressingMode::AbsoluteX, 7, Self::lsr),
-            // NOP
-            0xEA => (AddressingMode::Implied, 2, Self::nop),
-            // ORA
-            0x09 => (AddressingMode::Immediate, 2, Self::ora), 0x05 => (AddressingMode::ZeroPage, 3, Self::ora), 0x15 => (AddressingMode::ZeroPageX, 4, Self::ora),
-            0x0D => (AddressingMode::Absolute, 4, Self::ora), 0x1D => (AddressingMode::AbsoluteX, 4, Self::ora), 0x19 => (AddressingMode::AbsoluteY, 4, Self::ora),
-            0x01 => (AddressingMode::IndexedIndirect, 6, Self::ora), 0x11 => (AddressingMode::IndirectIndexed, 5, Self::ora),
-            // Stack Instructions (Implied)
-           0x48 => (AddressingMode::Implied, 3, Self::pha), 0x08 => (AddressingMode::Implied, 3, Self::php),
-           0x68 => (AddressingMode::Implied, 4, Self::pla), 0x28 => (AddressingMode::Implied, 4, Self::plp),
-           // ROL
-           0x2A => (AddressingMode::Accumulator, 2, Self::rol), 0x26 => (AddressingMode::ZeroPage, 5, Self::rol), 0x36 => (AddressingMode::ZeroPageX, 6, Self::rol),
-           0x2E => (AddressingMode::Absolute, 6, Self::rol), 0x3E => (AddressingMode::AbsoluteX, 7, Self::rol),
-           // ROR
-           0x6A => (AddressingMode::Accumulator, 2, Self::ror), 0x66 => (AddressingMode::ZeroPage, 5, Self::ror), 0x76 => (AddressingMode::ZeroPageX, 6, Self::ror),
-           0x6E => (AddressingMode::Absolute, 6, Self::ror), 0x7E => (AddressingMode::AbsoluteX, 7, Self::ror),
-           // RTI, RTS (Implied) - Pass mode now
-           0x40 => (AddressingMode::Implied, 6, Self::rti),
-           0x60 => (AddressingMode::Implied, 6, Self::rts),
-           // SBC
-           0xE9 => (AddressingMode::Immediate, 2, Self::sbc), 0xE5 => (AddressingMode::ZeroPage, 3, Self::sbc), 0xF5 => (AddressingMode::ZeroPageX, 4, Self::sbc),
-           0xED => (AddressingMode::Absolute, 4, Self::sbc), 0xFD => (AddressingMode::AbsoluteX, 4, Self::sbc), 0xF9 => (AddressingMode::AbsoluteY, 4, Self::sbc),
-           0xE1 => (AddressingMode::IndexedIndirect, 6, Self::sbc), 0xF1 => (AddressingMode::IndirectIndexed, 5, Self::sbc),
-           // STA
-           0x85 => (AddressingMode::ZeroPage, 3, Self::sta), 0x95 => (AddressingMode::ZeroPageX, 4, Self::sta),
-           0x8D => (AddressingMode::Absolute, 4, Self::sta), 0x9D => (AddressingMode::AbsoluteX, 5, Self::sta), 0x99 => (AddressingMode::AbsoluteY, 5, Self::sta),
-           0x81 => (AddressingMode::IndexedIndirect, 6, Self::sta), 0x91 => (AddressingMode::IndirectIndexed, 6, Self::sta),
-           // STX
-           0x86 => (AddressingMode::ZeroPage, 3, Self::stx), 0x96 => (AddressingMode::ZeroPageY, 4, Self::stx), 0x8E => (AddressingMode::Absolute, 4, Self::stx),
-           // STY
-           0x84 => (AddressingMode::ZeroPage, 3, Self::sty), 0x94 => (AddressingMode::ZeroPageX, 4, Self::sty), 0x8C => (AddressingMode::Absolute, 4, Self::sty),
-           // Transfer Instructions (Implied)
-           0xAA => (AddressingMode::Implied, 2, Self::tax), 0xA8 => (AddressingMode::Implied, 2, Self::tay),
-           0xBA => (AddressingMode::Implied, 2, Self::tsx), 0x8A => (AddressingMode::Implied, 2, Self::txa),
-           0x9A => (AddressingMode::Implied, 2, Self::txs), 0x98 => (AddressingMode::Implied, 2, Self::tya),
-           // --- Unofficial Opcodes (Treat as NOP for now) ---
-           0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => (AddressingMode::Implied, 2, Self::nop),
-           0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => (AddressingMode::Immediate, 2, Self::nop),
-           0x04 | 0x44 | 0x64 => (AddressingMode::ZeroPage, 3, Self::nop),
-           0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => (AddressingMode::ZeroPageX, 4, Self::nop),
-           0x0C => (AddressingMode::Absolute, 4, Self::nop),
-           0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => (AddressingMode::AbsoluteX, 4, Self::nop),
-           // LAX
-           0xA7 => (AddressingMode::ZeroPage, 3, Self::lax), 0xB7 => (AddressingMode::ZeroPageY, 4, Self::lax),
-           0xAF => (AddressingMode::Absolute, 4, Self::lax), 0xBF => (AddressingMode::AbsoluteY, 4, Self::lax),
-           0xA3 => (AddressingMode::IndexedIndirect, 6, Self::lax), 0xB3 => (AddressingMode::IndirectIndexed, 5, Self::lax),
-           // SAX
-           0x87 => (AddressingMode::ZeroPage, 3, Self::sax), 0x97 => (AddressingMode::ZeroPageY, 4, Self::sax),
-           0x8F => (AddressingMode::Absolute, 4, Self::sax), 0x83 => (AddressingMode::IndexedIndirect, 6, Self::sax),
-           // Unofficial SBC
-           0xEB => (AddressingMode::Immediate, 2, Self::sbc),
-           // Add more later (DCP, ISB, SLO, RLA, SRE, RRA)
-           // For now, treat remaining unknowns as NOP (Implied, 2 cycles)
-           _ => {
-              println!("!!! Treating Unknown Opcode {:02X} as NOP at PC: {:04X} !!!", self.opcode, pc_before);
-              (AddressingMode::Implied, 2, Self::nop)
-           }
-        };
+            0xA0 | 0xA4 | 0xB4 | 0xAC | 0xBC => { 
+                let value = operand_value;
+                self.registers.y_register = value;
+                self.update_nz_flags(value);
+            },
+            
+            // --- Store Instructions ---
+            0x85 | 0x95 | 0x8D | 0x9D | 0x99 | 0x81 | 0x91 => { // STA
+                 if addr == 0x2007 {
+                    println!("[CPU STA] Attempting to write to $2007 with Data=${:02X}", self.registers.accumulator);
+                 }
+                 bus.write(addr, self.registers.accumulator);
+            },
+            0x86 | 0x96 | 0x8E => { // STX
+                 bus.write(addr, self.registers.x_register);
+            },
+            0x84 | 0x94 | 0x8C => { // STY
+                 bus.write(addr, self.registers.y_register);
+            },
+            
+            // --- Transfer Instructions ---
+            0xAA => { // TAX
+                self.registers.x_register = self.registers.accumulator; 
+                self.update_nz_flags(self.registers.x_register);
+            },
+            0xA8 => { // TAY
+                self.registers.y_register = self.registers.accumulator; 
+                self.update_nz_flags(self.registers.y_register);
+            },
+            0xBA => { // TSX
+                self.registers.x_register = self.registers.stack_pointer; 
+                self.update_nz_flags(self.registers.x_register);
+            },
+            0x8A => { // TXA
+                self.registers.accumulator = self.registers.x_register; 
+                self.update_nz_flags(self.registers.accumulator);
+            },
+            0x9A => { // TXS
+                self.registers.stack_pointer = self.registers.x_register;
+            },
+            0x98 => { // TYA
+                self.registers.accumulator = self.registers.y_register; 
+                self.update_nz_flags(self.registers.accumulator);
+            },
+            
+            // --- Stack Instructions ---
+            0x48 => { // PHA
+                self.push(bus, self.registers.accumulator);
+            },
+            0x08 => { // PHP
+                self.push(bus, self.registers.status | FLAG_BREAK | FLAG_UNUSED);
+            },
+            0x68 => { // PLA
+                self.registers.accumulator = self.pull(bus); 
+                self.update_nz_flags(self.registers.accumulator);
+            },
+            0x28 => { // PLP
+                self.registers.status = (self.pull(bus) & !FLAG_BREAK) | FLAG_UNUSED;
+            },
+            
+            // --- Increment/Decrement --- (Register only)
+            0xE8 => { // INX
+                self.registers.x_register = self.registers.x_register.wrapping_add(1); 
+                self.update_nz_flags(self.registers.x_register);
+            },
+            0xC8 => { // INY
+                self.registers.y_register = self.registers.y_register.wrapping_add(1); 
+                self.update_nz_flags(self.registers.y_register);
+            },
+            0xCA => { // DEX
+                self.registers.x_register = self.registers.x_register.wrapping_sub(1); 
+                self.update_nz_flags(self.registers.x_register);
+            },
+            0x88 => { // DEY
+                self.registers.y_register = self.registers.y_register.wrapping_sub(1); 
+                self.update_nz_flags(self.registers.y_register);
+            },
+            
+            // --- Increment/Decrement Memory ---
+            0xE6 | 0xF6 | 0xEE | 0xFE => { // INC
+                let value = operand_value;
+                let result = value.wrapping_add(1);
+                bus.write(addr, result);
+                self.update_nz_flags(result);
+            },
+            0xC6 | 0xD6 | 0xCE | 0xDE => { // DEC
+                let value = operand_value;
+                let result = value.wrapping_sub(1);
+                bus.write(addr, result);
+                self.update_nz_flags(result);
+            },
+            
+            // --- Arithmetic ---
+            0x69 | 0x65 | 0x75 | 0x6D | 0x7D | 0x79 | 0x61 | 0x71 => { // ADC
+                let value = operand_value;
+                self.add(bus, value);
+            },
+            0xE9 | 0xE5 | 0xF5 | 0xED | 0xFD | 0xF9 | 0xE1 | 0xF1 => { // SBC
+                let value = operand_value;
+                self.add(bus, !value);
+            },
+            
+            // --- Comparisons ---
+            0xC9 | 0xC5 | 0xD5 | 0xCD | 0xDD | 0xD9 | 0xC1 | 0xD1 => { // CMP
+                let value = operand_value;
+                self.compare(self.registers.accumulator, value);
+            },
+            0xE0 | 0xE4 | 0xEC => { // CPX
+                let value = operand_value;
+                self.compare(self.registers.x_register, value);
+            },
+            0xC0 | 0xC4 | 0xCC => { // CPY
+                let value = operand_value;
+                self.compare(self.registers.y_register, value);
+            },
+            
+            // --- Logical Operations ---
+            0x29 | 0x25 | 0x35 | 0x2D | 0x3D | 0x39 | 0x21 | 0x31 => { // AND
+                let value = operand_value;
+                self.registers.accumulator &= value;
+                self.update_nz_flags(self.registers.accumulator);
+            },
+            0x09 | 0x05 | 0x15 | 0x0D | 0x1D | 0x19 | 0x01 | 0x11 => { // ORA
+                let value = operand_value;
+                self.registers.accumulator |= value;
+                self.update_nz_flags(self.registers.accumulator);
+            },
+            0x49 | 0x45 | 0x55 | 0x4D | 0x5D | 0x59 | 0x41 | 0x51 => { // EOR
+                let value = operand_value;
+                self.registers.accumulator ^= value;
+                self.update_nz_flags(self.registers.accumulator);
+            },
+            
+            // --- Bit Operations ---
+            0x24 | 0x2C => { // BIT
+                let value = operand_value;
+                let result = self.registers.accumulator & value;
+                
+                // Set zero flag based on AND result
+                if result == 0 {
+                    self.registers.status |= FLAG_ZERO;
+                } else {
+                    self.registers.status &= !FLAG_ZERO;
+                }
+                
+                // Copy bits 6 and 7 of the value to the status register
+                self.registers.status = (self.registers.status & 0x3F) | (value & 0xC0);
+            },
+            
+            // --- Flag Operations ---
+            0x18 => self.registers.status &= !FLAG_CARRY, // CLC
+            0x38 => self.registers.status |= FLAG_CARRY, // SEC
+            0x58 => self.registers.status &= !FLAG_INTERRUPT_DISABLE, // CLI
+            0x78 => self.registers.status |= FLAG_INTERRUPT_DISABLE, // SEI
+            0xB8 => self.registers.status &= !FLAG_OVERFLOW, // CLV
+            0xD8 => self.registers.status &= !FLAG_DECIMAL, // CLD
+            0xF8 => self.registers.status |= FLAG_DECIMAL, // SED
+            
+            // --- Shifts & Rotates ---
+            0x0A | 0x06 | 0x16 | 0x0E | 0x1E => { // ASL
+                let value = if mode == AddressingMode::Accumulator { 
+                    self.registers.accumulator 
+                } else { 
+                    bus.read(addr) 
+                };
+                
+                // Set carry flag to bit 7
+                if (value & 0x80) != 0 {
+                    self.registers.status |= FLAG_CARRY;
+                } else {
+                    self.registers.status &= !FLAG_CARRY;
+                }
+                
+                let result = value << 1;
+                self.update_nz_flags(result);
+                
+                if mode == AddressingMode::Accumulator {
+                    self.registers.accumulator = result;
+                } else {
+                    bus.write(addr, result);
+                }
+            },
+            0x4A | 0x46 | 0x56 | 0x4E | 0x5E => { // LSR
+                let value = if mode == AddressingMode::Accumulator { 
+                    self.registers.accumulator 
+                } else { 
+                    bus.read(addr) 
+                };
+                
+                // Set carry flag to bit 0
+                if (value & 0x01) != 0 {
+                    self.registers.status |= FLAG_CARRY;
+                } else {
+                    self.registers.status &= !FLAG_CARRY;
+                }
+                
+                let result = value >> 1;
+                self.update_nz_flags(result);
+                
+                if mode == AddressingMode::Accumulator {
+                    self.registers.accumulator = result;
+                } else {
+                    bus.write(addr, result);
+                }
+            },
+            0x2A | 0x26 | 0x36 | 0x2E | 0x3E => { // ROL
+                let value = if mode == AddressingMode::Accumulator { 
+                    self.registers.accumulator 
+                } else { 
+                    bus.read(addr) 
+                };
+                
+                let old_carry = if (self.registers.status & FLAG_CARRY) != 0 { 1 } else { 0 };
+                
+                // Set carry flag to bit 7
+                if (value & 0x80) != 0 {
+                    self.registers.status |= FLAG_CARRY;
+                } else {
+                    self.registers.status &= !FLAG_CARRY;
+                }
+                
+                let result = (value << 1) | old_carry;
+                self.update_nz_flags(result);
+                
+                if mode == AddressingMode::Accumulator {
+                    self.registers.accumulator = result;
+                } else {
+                    bus.write(addr, result);
+                }
+            },
+            0x6A | 0x66 | 0x76 | 0x6E | 0x7E => { // ROR
+                let value = if mode == AddressingMode::Accumulator { 
+                    self.registers.accumulator 
+                } else { 
+                    bus.read(addr) 
+                };
+                
+                let old_carry = if (self.registers.status & FLAG_CARRY) != 0 { 0x80 } else { 0 };
+                
+                // Set carry flag to bit 0
+                if (value & 0x01) != 0 {
+                    self.registers.status |= FLAG_CARRY;
+                } else {
+                    self.registers.status &= !FLAG_CARRY;
+                }
+                
+                let result = (value >> 1) | old_carry;
+                self.update_nz_flags(result);
+                
+                if mode == AddressingMode::Accumulator {
+                    self.registers.accumulator = result;
+                } else {
+                    bus.write(addr, result);
+                }
+            },
+            
+            // --- JMP / JSR ---
+            0x4C | 0x6C => self.registers.program_counter = addr, // JMP
+            0x20 => { // JSR
+                let return_addr = self.registers.program_counter - 1;
+                self.push(bus, (return_addr >> 8) as u8);
+                self.push(bus, return_addr as u8);
+                self.registers.program_counter = addr;
+            },
+            
+            // --- Returns ---
+            0x60 => { // RTS
+                let lo = self.pull(bus) as u16;
+                let hi = self.pull(bus) as u16;
+                self.registers.program_counter = ((hi << 8) | lo).wrapping_add(1);
+            },
+            0x40 => { // RTI
+                self.registers.status = self.pull(bus);
+                self.registers.status &= !FLAG_BREAK; // Clear B flag
+                self.registers.status |= FLAG_UNUSED;  // Set U flag
+                let lo = self.pull(bus) as u16;
+                let hi = self.pull(bus) as u16;
+                self.registers.program_counter = (hi << 8) | lo;
+            },
+            
+            // --- Branches ---
+            0x10 | 0x30 | 0x50 | 0x70 | 0x90 | 0xB0 | 0xD0 | 0xF0 => {
+                let condition = self.check_branch_condition(opcode);
+                if condition {
+                    // Branch taken: Add 1 cycle + potential page cross cycle
+                    let pc_after_instruction = current_pc.wrapping_add(2); // PC after opcode and operand
+                    let page_crossed = self.check_page_cross(pc_after_instruction, addr); // addr is target
+                    self.registers.program_counter = addr;
+                    return 1 + if page_crossed { 1 } else { 0 };
+                } // else: branch not taken, return 0 extra cycles
+            },
+            
+            // --- BRK ---
+            0x00 => { // BRK
+                self.registers.program_counter = self.registers.program_counter.wrapping_add(1);
+                self.push(bus, (self.registers.program_counter >> 8) as u8);
+                self.push(bus, (self.registers.program_counter & 0xFF) as u8);
+                self.push(bus, self.registers.status | FLAG_BREAK | FLAG_UNUSED);
+                self.registers.status |= FLAG_INTERRUPT_DISABLE;
+                self.registers.program_counter = bus.read_u16(IRQ_BRK_VECTOR_ADDR);
+                self.brk_executed = true;
+            },
+            
+            // --- NOP ---
+            0xEA => {}, // NOP - Official NOP
+            
+            // --- Unofficial NOPs ---
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => {}, // NOPs
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => {}, // NOPs with immediate
+            0x04 | 0x44 | 0x64 | 0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => {}, // NOPs with zp
+            0x0C | 0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => {}, // NOPs with abs
+            
+            // --- LAX (unofficial) ---
+            0xA7 | 0xB7 | 0xAF | 0xBF | 0xA3 | 0xB3 => {
+                let value = operand_value;
+                self.registers.accumulator = value;
+                self.registers.x_register = value;
+                self.update_nz_flags(value);
+            },
+            
+            // --- SAX (unofficial) ---
+            0x87 | 0x97 | 0x8F | 0x83 => {
+                let value = self.registers.accumulator & self.registers.x_register;
+                bus.write(addr, value);
+            },
+            
+            // --- Unofficial Opcodes (Treating as NOPs for now, with logging) ---
 
-        // Execute the instruction function
-        instruction_fn(self, bus, mode);
+            // KIL/HLT/JAM (Treated as NOP for now)
+            0x02 | 0x12 | 0x22 | 0x32 | 0x42 | 0x52 | 0x62 | 0x72 |
+            0x92 | 0xB2 | 0xD2 | 0xF2 => {
+                println!("WARN: Unofficial KIL/HLT opcode ${:02X} encountered (treated as NOP)", opcode);
+                 // Halt emulation? For now, just act as NOP.
+            }
 
-        // TODO: Calculate extra cycles for page crossing, branches etc.
-        let cycles_taken = base_cycles; // Placeholder
+            // SLO (ASO) = ASL operand + ORA operand
+            0x07 | 0x17 | 0x0F | 0x1F | 0x1B | 0x03 | 0x13 => {
+                //println!("WARN: Unofficial SLO/ASO opcode ${:02X} encountered (basic impl)", opcode);
+                let operand_val = bus.read(addr);
+                // ASL part
+                if (operand_val & 0x80) != 0 { self.registers.status |= FLAG_CARRY; } else { self.registers.status &= !FLAG_CARRY; }
+                let shifted = operand_val.wrapping_shl(1);
+                bus.write(addr, shifted);
+                // ORA part
+                self.registers.accumulator |= shifted;
+                self.update_nz_flags(self.registers.accumulator);
+            }
 
-        // Logging (Consider moving this to Bus::clock after PPU step)
-        println!(
-            // Format: PC   OP MNEMONIC?   A  X  Y  P  SP CYC (Simplified format)
-            "{:<4X}  {:02X}            A:{:02X} X:{:02X} Y:{:02X} P:{:02X} SP:{:02X} CYC:{:>3}",
-            pc_before, self.opcode, // Removed placeholders for mnemonic/bytes
-            self.registers.accumulator, self.registers.index_x, self.registers.index_y,
-            self.registers.status, self.registers.stack_pointer,
-            bus.total_cycles // Bus cycle count *before* PPU step for this instruction
-        );
+            // RLA = ROL operand + AND operand
+            0x27 | 0x37 | 0x2F | 0x3F | 0x3B | 0x23 | 0x33 => {
+                //println!("WARN: Unofficial RLA opcode ${:02X} encountered (basic impl)", opcode);
+                let operand_val = bus.read(addr);
+                let old_carry = self.registers.status & FLAG_CARRY;
+                // ROL part
+                if (operand_val & 0x80) != 0 { self.registers.status |= FLAG_CARRY; } else { self.registers.status &= !FLAG_CARRY; }
+                let rotated = (operand_val << 1) | old_carry;
+                bus.write(addr, rotated);
+                // AND part
+                self.registers.accumulator &= rotated;
+                self.update_nz_flags(self.registers.accumulator);
+            }
 
-        cycles_taken
+            // SRE (LSE) = LSR operand + EOR operand
+            0x47 | 0x57 | 0x4F | 0x5F | 0x5B | 0x43 | 0x53 => {
+                println!("WARN: Unofficial SRE/LSE opcode ${:02X} encountered (treated as NOP)", opcode);
+                 // Placeholder NOP
+            }
+
+            // RRA = ROR operand + ADC operand
+            0x67 | 0x77 | 0x6F | 0x7F | 0x7B | 0x63 | 0x73 => {
+                println!("WARN: Unofficial RRA opcode ${:02X} encountered (treated as NOP)", opcode);
+                 // Placeholder NOP
+            }
+
+            // SAX (AXS) = Store A & X
+            0x87 | 0x97 | 0x8F | 0x83 => {
+                //println!("WARN: Unofficial SAX/AXS opcode ${:02X} encountered (basic impl)", opcode);
+                let value = self.registers.accumulator & self.registers.x_register;
+                bus.write(addr, value);
+            }
+
+            // LAX = LDA operand + LDX operand
+            0xA7 | 0xB7 | 0xAF | 0xBF | 0xA3 | 0xB3 => {
+                //println!("WARN: Unofficial LAX opcode ${:02X} encountered (basic impl)", opcode);
+                let operand_val = bus.read(addr);
+                self.registers.accumulator = operand_val;
+                self.registers.x_register = operand_val;
+                self.update_nz_flags(operand_val);
+            }
+
+            // DCP (DCM) = DEC operand + CMP operand
+            0xC7 | 0xD7 | 0xCF | 0xDF | 0xDB | 0xC3 | 0xD3 => {
+                //println!("WARN: Unofficial DCP/DCM opcode ${:02X} encountered (basic impl)", opcode);
+                let operand_val = bus.read(addr).wrapping_sub(1);
+                bus.write(addr, operand_val);
+                self.compare(self.registers.accumulator, operand_val);
+            }
+
+            // ISC (ISB, INS) = INC operand + SBC operand
+            0xE7 | 0xF7 | 0xEF | 0xFF | 0xFB | 0xE3 | 0xF3 => {
+                //println!("WARN: Unofficial ISC/ISB/INS opcode ${:02X} encountered (basic impl)", opcode);
+                 let operand_val = bus.read(addr).wrapping_add(1);
+                 bus.write(addr, operand_val);
+                 // Reuse SBC logic (effectively A = A + !operand + Carry)
+                 let sbc_operand = !operand_val;
+                 self.add(bus, sbc_operand);
+            }
+
+            // NOPs (unofficial)
+            0x1A | 0x3A | 0x5A | 0x7A | 0xDA | 0xFA => {}, // NOP (imp)
+            0x80 | 0x82 | 0x89 | 0xC2 | 0xE2 => {}, // NOP #i (imm)
+            0x04 | 0x44 | 0x64 | 0x14 | 0x34 | 0x54 | 0x74 | 0xD4 | 0xF4 => {}, // NOP zp/zp,X
+            0x0C | 0x1C | 0x3C | 0x5C | 0x7C | 0xDC | 0xFC => {}, // NOP abs/abs,X
+
+            // --- End Unofficial Opcodes ---
+
+            _ => {
+                println!("WARN: Unimplemented or unknown official opcode {:02X} encountered!", opcode);
+                // Potentially halt or panic here depending on desired strictness
+            }
+        }
+
+        // --- Handle Read Side Effects AFTER instruction execution logic ---
+        // This prevents side effects from interfering with the instruction's logic
+        // (e.g., BIT reading $2002 shouldn't immediately clear the VBlank flag it just read)
+        if mode != AddressingMode::Immediate && mode != AddressingMode::Accumulator &&
+           mode != AddressingMode::Implied && mode != AddressingMode::Relative {
+            
+            let effective_addr = addr; // Use the calculated effective address
+            
+            if (effective_addr & 0xE007) == 0x2002 { // Check for $2002 mirror read
+                bus.ppu_status_read_side_effects();
+                // Note: The actual value returned to the CPU instruction (operand_value)
+                // was read *before* this side effect occurred.
+            } else if (effective_addr & 0xE007) == 0x2007 { // Check for $2007 mirror read
+                 // $2007 side effects should return the *buffered* value,
+                 // but the operand_value already holds the *new* data read for the buffer.
+                 // The side effect function handles the buffering logic.
+                 bus.ppu_data_read_side_effects(operand_value);
+                 // The CPU instruction already used the value from the buffer (implicitly handled by ppu_data_read_side_effects before?) - this needs review.
+                 // For now, we assume the original read got the buffered value, and this call just updates the buffer.
+            }
+        }
+        // Default: No extra cycles from execution itself
+        0
     }
+
+    // --- check_branch_condition (needs opcode argument) ---
+    fn check_branch_condition(&self, opcode: u8) -> bool {
+        match opcode {
+            0x10 => (self.registers.status & FLAG_NEGATIVE) == 0, // BPL
+            0x30 => (self.registers.status & FLAG_NEGATIVE) != 0, // BMI
+            0x50 => (self.registers.status & FLAG_OVERFLOW) == 0, // BVC
+            0x70 => (self.registers.status & FLAG_OVERFLOW) != 0, // BVS
+            0x90 => (self.registers.status & FLAG_CARRY) == 0,    // BCC
+            0xB0 => (self.registers.status & FLAG_CARRY) != 0,    // BCS
+            0xD0 => (self.registers.status & FLAG_ZERO) == 0,    // BNE
+            0xF0 => (self.registers.status & FLAG_ZERO) != 0,    // BEQ
+            _ => false,
+        }
+    }
+
+    // --- check_page_cross --- (remains the same) ---
+     fn check_page_cross(&self, addr1: u16, addr2: u16) -> bool {
+         (addr1 & 0xFF00) != (addr2 & 0xFF00)
+     }
 
     // --- Inspection ---
-    // Returns a snapshot of the current CPU state
     pub fn inspect(&self) -> InspectState {
         InspectState {
             registers: self.registers.clone(),
@@ -832,29 +1055,160 @@ impl Cpu6502 {
         }
     }
 
-    // pub fn inspect_memory(&self, memory: &Memory, addr: u16) -> u8 {
-    //     memory.read(addr)
-    // }
-
     // --- Interrupt Handling ---
-    pub fn nmi(&mut self, bus: &mut Bus) {
-        let pc = self.registers.program_counter;
-        self.push(bus, (pc >> 8) as u8);
-        self.push(bus, (pc & 0xFF) as u8);
-        let status = (self.registers.status & !FLAG_BREAK) | FLAG_UNUSED;
-        self.push(bus, status);
-        self.registers.status |= INTERRUPT_DISABLE_FLAG;
-        let vector = self.read_u16(bus, 0xFFFA);
-        self.registers.program_counter = vector;
-        // NMI takes 7 cycles (accounted for by Bus)
+    // NMI割り込み処理 - handle_nmiメソッドの追加
+    fn handle_nmi(&mut self, bus: &mut impl BusAccess) -> u8 {
+        // PCをスタックにプッシュ
+        self.push(bus, (self.registers.program_counter >> 8) as u8);
+        self.push(bus, (self.registers.program_counter & 0xFF) as u8);
+        
+        // ステータスレジスタをスタックにプッシュ (Bフラグをクリア、UNUSEDフラグをセット)
+        self.push(bus, (self.registers.status & !FLAG_BREAK) | FLAG_UNUSED);
+        
+        // 割り込み禁止フラグをセット
+        self.registers.status |= FLAG_INTERRUPT_DISABLE;
+        
+        // NMIベクターからPCを読み込む
+        self.registers.program_counter = bus.read_u16(NMI_VECTOR_ADDR);
+        
+        // NMIには7サイクルかかる
+        self.cycles = 7;
+        
+        if DEBUG_PRINT {
+            println!("NMI triggered! PC set to ${:04X}", self.registers.program_counter);
+        }
+        7
+    }
+
+    // is_brk_executedメソッドの修正 - opcodeを使用せずにbrk_executedフラグを使う
+    pub fn is_brk_executed(&self) -> bool {
+        self.brk_executed
+    }
+
+    // trigger_nmiメソッドの修正
+    pub fn trigger_nmi(&mut self) {
+        self.nmi_pending = true;
+    }
+
+    // --- Other Debug Helpers ---
+    pub fn debug_stack_pointer(&self) -> String {
+        format!("SP=${:02X} (Points to ${:04X})",
+                 self.registers.stack_pointer, 0x0100 + self.registers.stack_pointer as u16)
+    }
+    // pub fn dump_memory(&self, bus: &Bus, ...) { ... } // Needs &Bus again -> Requires BusAccess
+    pub fn dump_memory(&self, bus: &impl BusAccess, start_addr: u16, length: u16) {
+         println!("Memory Dump from ${:04X} to ${:04X}:", start_addr, start_addr.saturating_add(length).saturating_sub(1));
+         let effective_length = length.min(256); // Limit dump length
+
+         for base_addr_offset in (0..effective_length).step_by(16) {
+             let base_addr = match start_addr.checked_add(base_addr_offset) {
+                 Some(addr) => addr,
+                 None => break,
+             };
+             if base_addr >= start_addr.saturating_add(length) && length > 0 { break; }
+
+             print!("${:04X}:", base_addr);
+             let mut bytes_line = String::new();
+             let mut ascii_line = String::new();
+
+             for i in 0..16 {
+                 let current_addr = match base_addr.checked_add(i) {
+                     Some(addr) => addr,
+                     None => break,
+                 };
+                 if current_addr >= start_addr.saturating_add(length) {
+                      bytes_line.push_str("   ");
+                      ascii_line.push(' ');
+                 } else {
+                     let byte = bus.read(current_addr); // Use bus.read
+                     bytes_line.push_str(&format!(" {:02X}", byte));
+                     ascii_line.push(if (0x20..=0x7E).contains(&byte) { byte as char } else { '.' });
+                 }
+             }
+             println!("{}  |{}|", bytes_line, ascii_line);
+         }
+     }
+
+    pub fn add(&mut self, bus: &impl BusAccess, operand: u8) {
+        let acc = self.registers.accumulator;
+        let carry = self.registers.status & FLAG_CARRY;
+
+        let sum16 = acc as u16 + operand as u16 + carry as u16;
+        let result = sum16 as u8;
+
+        // Set Carry flag
+        if sum16 > 0xFF {
+            self.registers.status |= FLAG_CARRY;
+        } else {
+            self.registers.status &= !FLAG_CARRY;
+        }
+
+        // Set Overflow flag
+        // Overflow = (A^operand) & 0x80 == 0 && (A^result) & 0x80 != 0
+        if ((acc ^ operand) & 0x80 == 0) && ((acc ^ result) & 0x80 != 0) {
+            self.registers.status |= FLAG_OVERFLOW;
+        } else {
+            self.registers.status &= !FLAG_OVERFLOW;
+        }
+
+        self.registers.accumulator = result;
+        self.update_nz_flags(result);
+    }
+
+    pub fn branch(&mut self, offset: i8) -> u8 {
+        let old_pc = self.registers.program_counter;
+        
+        // Convert PC to i32 to handle potential overflow during addition
+        let pc = self.registers.program_counter as i32;
+        let new_pc = (pc + offset as i32) & 0xFFFF;
+        self.registers.program_counter = new_pc as u16;
+        
+        // Check if page boundary crossed (high byte changed)
+        let page_crossed = (old_pc & 0xFF00) != (self.registers.program_counter & 0xFF00);
+        
+        if page_crossed {
+            2 // Additional cycle for page boundary crossing
+        } else {
+            1 // Branch taken without page crossing
+        }
     }
 }
 
-// Default implementation for Cpu6502
+// --- Default Trait Implementation ---
 impl Default for Cpu6502 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-// Removed CpuState struct and its impl block as it was duplicated/replaced by InspectState
+// ★★★ Add decode_for_disassembly (basic version) ★★★
+impl Cpu6502 {
+     pub fn decode_for_disassembly(&self, opcode: u8) -> (&'static str, u8, &'static str) {
+         // Use the existing decode_opcode but extract relevant parts
+         let (mode, _, name) = self.decode_opcode(opcode);
+         let operand_bytes = match mode {
+             AddressingMode::Implied | AddressingMode::Accumulator => 0,
+             AddressingMode::Immediate | AddressingMode::ZeroPage | AddressingMode::ZeroPageX |
+             AddressingMode::ZeroPageY | AddressingMode::Relative | AddressingMode::IndexedIndirect |
+             AddressingMode::IndirectIndexed => 1,
+             AddressingMode::Absolute | AddressingMode::AbsoluteX | AddressingMode::AbsoluteY |
+             AddressingMode::Indirect => 2,
+         };
+         let mode_str = match mode {
+             AddressingMode::Implied => "Implied",
+             AddressingMode::Accumulator => "Accumulator",
+             AddressingMode::Immediate => "Immediate",
+             AddressingMode::ZeroPage => "Zero Page",
+             AddressingMode::ZeroPageX => "Zero Page, X",
+             AddressingMode::ZeroPageY => "Zero Page, Y",
+             AddressingMode::Relative => "Relative",
+             AddressingMode::Absolute => "Absolute",
+             AddressingMode::AbsoluteX => "Absolute, X",
+             AddressingMode::AbsoluteY => "Absolute, Y",
+             AddressingMode::Indirect => "Indirect",
+             AddressingMode::IndexedIndirect => "(Indirect, X)",
+             AddressingMode::IndirectIndexed => "(Indirect), Y",
+         };
+         (name, operand_bytes, mode_str)
+     }
+}

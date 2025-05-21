@@ -35,139 +35,136 @@ impl Mapper for Mapper0 {
             return 0;
         }
 
-        // 特別なケース: ベクタアドレスのアクセス時にデバッグログを出力
-        if addr >= 0xFFFA && addr <= 0xFFFF {
-            // NROM maps $8000-$BFFF to first 16KB bank
-            // and $C000-$FFFF to the last 16KB bank (or mirror of first if only 1 bank)
-            let mapped_addr = if self.prg_banks == 1 {
-                // 16KBバンクが1つしかない場合: すべてをミラーリング
-                ((addr - 0x8000) % 0x4000) as usize
-            } else { 
-                // 32KBバンクの場合: 直接マッピング
-                (addr - 0x8000) as usize
-            };
-            
-            if mapped_addr < self.prg_rom.len() {
-                let value = self.prg_rom[mapped_addr];
-                
-                // デバッグログを出力
-                match addr {
-                    0xFFFA | 0xFFFB => {
-                        println!("NMI vector read at ${:04X}: ${:02X} (ROM addr: ${:04X})", 
-                            addr, value, mapped_addr);
-                    },
-                    0xFFFC | 0xFFFD => {
-                        println!("Reset vector read at ${:04X}: ${:02X} (ROM addr: ${:04X})", 
-                            addr, value, mapped_addr);
-                    },
-                    0xFFFE | 0xFFFF => {
-                        println!("IRQ vector read at ${:04X}: ${:02X} (ROM addr: ${:04X})", 
-                            addr, value, mapped_addr);
-                    },
-                    _ => {}
-                }
-                
-                return value;
-            } else {
-                return 0;
-            }
-        }
-
-        // 通常のアクセス処理（ベクタアドレス以外）
+        // すべての$8000以上のアクセスはこちらで処理
         let mapped_addr = if self.prg_banks == 1 {
-            // 16KBバンクが1つしかない場合: すべてをミラーリング
-            ((addr - 0x8000) % 0x4000) as usize
-        } else { 
-            // 32KBバンクの場合: 直接マッピング
-            (addr - 0x8000) as usize
+            // NROM-128 (16KB PRG): $8000-$BFFF maps to the 16KB ROM, mirrored at $C000-$FFFF
+            (addr & 0x3FFF) as usize // Mask to 14 bits (16KB range)
+        } else {
+            // NROM-256 (32KB PRG): $8000-$FFFF maps directly to the 32KB ROM
+            (addr & 0x7FFF) as usize // Mask to 15 bits (32KB range)
         };
         
-        // アドレスが範囲内かチェック
+        // Read from PRG ROM
         if mapped_addr < self.prg_rom.len() {
             self.prg_rom[mapped_addr]
         } else {
-            0
+            // Handle potential out-of-bounds read, although masking should prevent this
+             // Limit log spam
+            if addr % 0x100 == 0 {
+                 eprintln!("WARN: Read out of bounds PRG ROM access at {:04X} (Mapped: {}, Size: {})", addr, mapped_addr, self.prg_rom.len());
+            }
+            0xFF // Return 0xFF (often represents open bus behavior)
         }
     }
 
     fn write_prg(&mut self, addr: u16, data: u8) {
         // マッパー0は通常PRG ROMに書き込めないが、特殊な機能を追加
         // BG切り替えスイッチ機能の実装
-        if addr >= 0x8000 && addr <= 0x8FFF {
-            // $8000-$8FFFへの書き込みを特殊なマッパーレジスタとして扱う
-            if data & 0x80 != 0 {
-                // BG切り替えスイッチ有効化
-                self.bg_switch_enabled = true;
-                self.bg_bank_selected = data & 0x03; // 下位2ビットでバンク選択
-                println!("Mapper 0: BG Switch enabled, bank: {}", self.bg_bank_selected);
-            } else {
-                // 通常はPRG ROMに書き込めない
-                eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
-            }
-        } else {
-            // 通常はPRG ROMに書き込めない
-            eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
-        }
+        // if addr >= 0x8000 && addr <= 0x8FFF { // <<< この if ブロック全体をコメントアウト
+        //     // $8000-$8FFFへの書き込みを特殊なマッパーレジスタとして扱う
+        //     if data & 0x80 != 0 {
+        //         // BG切り替えスイッチ有効化
+        //         self.bg_switch_enabled = true;
+        //         self.bg_bank_selected = data & 0x03; // 下位2ビットでバンク選択
+        //         println!("Mapper 0: BG Switch enabled, bank: {}", self.bg_bank_selected);
+        //     } else {
+        //         // 通常はPRG ROMに書き込めない
+        //         // eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+        //     }
+        // } else { // <<< この else と対応する括弧も
+        //     // 通常はPRG ROMに書き込めない
+        //     // eprintln!("WARN: Attempted write to PRG ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+        // } // <<< ここまでコメントアウト
     }
 
     fn read_chr(&self, addr: u16) -> u8 {
+        let original_addr = addr; // 元のアドレスをログ用に保持
         let addr = addr & 0x1FFF; // Ensure address is within 8KB range
         
         if self.chr_banks == 0 {
             // CHR RAM read
-            if (addr as usize) < self.chr_ram.len() {
-                self.chr_ram[addr as usize]
+            let index = addr as usize;
+            if index < self.chr_ram.len() {
+                // ★★★ CHR RAM 読み込みログ ★★★
+                // Limit log spam, e.g., log only first few addresses or specific tiles if needed
+                // if index < 0x10 || (index >= 0x1000 && index < 0x1010) {
+                //    println!("--- CHR RAM Read: OrigAddr:{:04X} Addr:{:04X} Index:{} Size:{} -> Data:{:02X} ---",
+                //             original_addr, addr, index, self.chr_ram.len(), self.chr_ram[index]);
+                // }
+                // ★★★ ここまで ★★★
+                self.chr_ram[index]
             } else {
-                eprintln!("WARN: Read out of bounds CHR RAM access at {:04X}", addr);
+                eprintln!("WARN: Read out of bounds CHR RAM access at {:04X} (Index: {}, Size: {})", addr, index, self.chr_ram.len());
                 0
             }
         } else {
             // CHR ROM read with BG切り替えスイッチ対応
-            if self.bg_switch_enabled && addr >= 0x1000 {
-                // パターンテーブル1のアクセス時、バンク切り替え
-                let bank_offset = self.bg_bank_selected as usize * 0x1000;
-                let offset_addr = addr as usize - 0x1000;
-                
-                if bank_offset + offset_addr < self.chr_rom.len() {
-                    return self.chr_rom[bank_offset + offset_addr];
+            // if self.bg_switch_enabled && addr >= 0x1000 { // ★ 特殊な BG 切り替え機能
+            //     // パターンテーブル1 ($1000-$1FFF) のアクセス時、バンク切り替え
+            //     let bank_offset = self.bg_bank_selected as usize * 0x1000; // ★ 4KB バンクと仮定している？
+            //     let offset_addr = addr as usize - 0x1000;
+            //     let final_index = bank_offset + offset_addr;
+            //
+            //     if final_index < self.chr_rom.len() {
+            //          // ★★★ CHR ROM Bank Read ログ ★★★
+            //         // Limit log spam
+            //         // if addr % 0x10 == 0 {
+            //         //    println!("--- CHR ROM Bank Read: OrigAddr:{:04X} Addr:{:04X} Bank:{} Index:{} Size:{} -> Data:{:02X} ---",
+            //         //            original_addr, addr, self.bg_bank_selected, final_index, self.chr_rom.len(), self.chr_rom[final_index]);
+            //         // }
+            //         // ★★★ ここまで ★★★
+            //         return self.chr_rom[final_index];
+            //     } else {
+            //         if addr % 0x100 == 0 { // Limit log spam
+            //             eprintln!("WARN: Read out of bounds CHR ROM bank access at {:04X} (Bank: {}, Index: {}, Size: {})",
+            //                 addr, self.bg_bank_selected, final_index, self.chr_rom.len());
+            //         }
+            //         return 0;
+            //     }
+            // } else {
+            // --- ここまで ---
+                // 通常のCHR ROMアクセス (BG Switch disabled or addr < 0x1000)
+                let index = addr as usize;
+                if index < self.chr_rom.len() {
+                     // ★★★ CHR ROM Read (Normal) ログ ★★★
+                     // Limit log spam
+                     // if addr % 0x10 == 0 {
+                     //    println!("--- CHR ROM Read (Normal/BG Disabled/<0x1000): OrigAddr:{:04X} Addr:{:04X} Index:{} Size:{} -> Data:{:02X} ---",
+                     //             original_addr, addr, index, self.chr_rom.len(), self.chr_rom[index]);
+                    // }
+                     // ★★★ ここまで ★★★
+                    self.chr_rom[index]
                 } else {
-                    if addr % 0x100 == 0 {
-                        eprintln!("WARN: Read out of bounds CHR ROM bank access at {:04X}, bank: {}", 
-                            addr, self.bg_bank_selected);
-                    }
-                    return 0;
-                }
-            } else {
-                // 通常のCHR ROMアクセス
-                if (addr as usize) < self.chr_rom.len() {
-                    self.chr_rom[addr as usize]
-                } else {
-                    if addr % 0x100 == 0 {
-                        eprintln!("WARN: Read out of bounds CHR ROM access at {:04X}", addr);
-                    }
+                     if addr % 0x100 == 0 { // Limit log spam
+                        eprintln!("WARN: Read out of bounds CHR ROM access at {:04X} (Index: {}, Size: {})", addr, index, self.chr_rom.len());
+                     }
                     0
                 }
-            }
+            // --- BG Switch を無効化 ---
+            // }
+            // --- ここまで ---
         }
     }
 
     fn write_chr(&mut self, addr: u16, data: u8) {
+        let original_addr = addr; // 元のアドレスをログ用に保持
         let addr = addr & 0x1FFF; // Ensure address is within 8KB range
         if self.chr_banks == 0 {
             // CHR RAM write
-            if (addr as usize) < self.chr_ram.len() {
+            let index = addr as usize;
+            if index < self.chr_ram.len() {
                 // ★★★ CHR RAM 書き込みログ ★★★
-                if addr < 0x10 || (addr >= 0x1000 && addr < 0x1010) { // Limit output
-                    println!("--- CHR RAM Write: Addr:{:04X} Data:{:02X} ---", addr, data);
-                }
+                // Limit log spam if necessary
+                 println!("--- CHR RAM Write: OrigAddr:{:04X} Addr:{:04X} Index:{} Size:{} Data:{:02X} ---",
+                          original_addr, addr, index, self.chr_ram.len(), data);
                 // ★★★ ここまで ★★★
-                self.chr_ram[addr as usize] = data;
+                self.chr_ram[index] = data;
             } else {
-                eprintln!("WARN: Write out of bounds CHR RAM access at {:04X}", addr);
+                eprintln!("WARN: Write out of bounds CHR RAM access at {:04X} (Index: {}, Size: {})", addr, index, self.chr_ram.len());
             }
         } else {
             // CHR ROM is generally not writable
-            eprintln!("WARN: Attempted write to CHR ROM (Mapper 0) at {:04X} with data {:02X}", addr, data);
+            // eprintln!("WARN: Attempted write to CHR ROM (Mapper 0) at OrigAddr:{:04X} Addr:{:04X} with data {:02X}", original_addr, addr, data); // Comment out the warning
         }
     }
 
@@ -268,5 +265,13 @@ impl Cartridge {
 
     pub fn mirror_mode(&self) -> Mirroring {
         self.mirroring // Return stored mirroring mode
+    }
+
+    pub fn get_mirroring(&self) -> Mirroring {
+        self.mirroring
+    }
+
+    pub fn get_mapper_id(&self) -> u8 {
+        self.mapper_id
     }
 } 

@@ -1,5 +1,4 @@
 use crate::emulator::Emulator;
-use crate::ppu::FrameData;
 use std::sync::{Arc, Mutex};
 use std::io::{self, Read};
 use std::fs::File;
@@ -115,18 +114,19 @@ pub struct NesEmu {
 }
 
 impl NesEmu {
-    // 新しいインスタンスを作成
     pub fn new() -> Self {
-        Self {
-            emulator: Arc::new(Mutex::new(Emulator::new())),
+        println!("NESエミュレータを初期化中...");
+        let emulator = Arc::new(Mutex::new(Emulator::new()));
+        
+        // Emulatorを初期化しておく
+        if let Ok(mut emu) = emulator.lock() {
+            println!("初期テストパターンを描画中...");
+            let _ = emu.toggle_test_mode(); // テストモードを有効化してパターンを描画
+        } else {
+            println!("エミュレータのロックに失敗しました");
         }
-    }
-
-    // エミュレーションの1フレームを実行
-    pub fn run_next_frame(&mut self) -> FrameData {
-        let mut emu = self.emulator.lock().unwrap();
-        emu.run_frame(); // フレームを実行
-        emu.bus.get_ppu_frame() // PPUのフレームデータを取得して返す
+        
+        NesEmu { emulator }
     }
 }
 
@@ -140,4 +140,34 @@ pub mod ppu;
 pub mod apu;
 pub mod controller;
 pub mod debugger;
-pub mod registers; 
+pub mod registers;
+
+// Tauriコマンド実装はsrc-tauri/src/main.rsに移動
+// このファイルからは削除しました
+
+// 重複するget_frame関数定義を削除
+// #[tauri::command]
+// pub fn get_frame(nes: State<'_, NesEmu>) -> Result<FrameData, String> {
+//     println!("フレーム取得リクエスト - タウリ関数実行");
+//     let start_time = std::time::Instant::now();
+//     
+//     let mut nes = nes.inner.lock().map_err(|e| e.to_string())?;
+//     let emulator = nes.emulator.as_mut().ok_or("エミュレータが初期化されていません")?;
+//     
+//     // フレーム実行を試行
+//     match emulator.run_frame() {
+//         Ok(frame) => {
+//             // デバッグ情報の出力
+//             let elapsed = start_time.elapsed();
+//             let non_zero = frame.pixels.iter().filter(|&&x| x != 0).count();
+//             println!("フレーム実行成功: {}x{}, 非ゼロピクセル: {}/{}, 処理時間: {:?}", 
+//                      frame.width, frame.height, non_zero, frame.pixels.len(), elapsed);
+//             
+//             Ok(frame)
+//         },
+//         Err(e) => {
+//             println!("フレーム実行エラー: {}", e);
+//             Err(format!("フレーム実行エラー: {}", e))
+//         }
+//     }
+// } 

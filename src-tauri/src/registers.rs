@@ -56,28 +56,40 @@
     #[derive(Debug, Default, Clone, Copy)]
     #[repr(transparent)]
     pub struct StatusRegister {
-        pub register: u8, // Keep the raw byte accessible
+        pub register: u8,
     }
 
     impl StatusRegister {
-        pub fn new() -> Self { Self { register: 0 } }
-        pub fn bits(&self) -> u8 { self.register }
-        // pub fn set_bits(&mut self, data: u8) { self.register = data; } // Typically only bits 7-5 are written by PPU hardware
-
-        // Getters for flags (read-only view)
-        pub fn sprite_overflow(&self) -> bool { (self.register & 0x20) != 0 }
-        pub fn sprite_zero_hit(&self) -> bool { (self.register & 0x40) != 0 }
-        pub fn vblank_started(&self) -> bool { (self.register & 0x80) != 0 }
-
-        // Setters used internally by PPU logic
-        pub fn set_sprite_overflow(&mut self, value: bool) {
-            if value { self.register |= 0x20; } else { self.register &= !0x20; }
+        pub fn new() -> Self {
+            Self { register: 0 }
         }
-        pub fn set_sprite_zero_hit(&mut self, value: bool) {
-            if value { self.register |= 0x40; } else { self.register &= !0x40; }
-        }
+
         pub fn set_vblank_started(&mut self, value: bool) {
-            if value { self.register |= 0x80; } else { self.register &= !0x80; }
+            if value {
+                self.register |= 0x80; // Set bit 7
+            } else {
+                self.register &= !0x80; // Clear bit 7
+            }
+        }
+
+        pub fn vblank_started(&self) -> bool {
+            (self.register & 0x80) != 0
+        }
+
+        pub fn set_sprite_zero_hit(&mut self, value: bool) {
+            if value {
+                self.register |= 0x40; // Set bit 6
+            } else {
+                self.register &= !0x40; // Clear bit 6
+            }
+        }
+
+        pub fn set_sprite_overflow(&mut self, value: bool) {
+            if value {
+                self.register |= 0x20; // Set bit 5
+            } else {
+                self.register &= !0x20; // Clear bit 5
+            }
         }
     }
 
@@ -134,22 +146,23 @@
 
         pub fn inc_fine_y(&mut self) -> bool {
             let fine_y = self.fine_y();
-            if fine_y < 7 {
+            let wrapped = if fine_y < 7 {
                 self.address += 0x1000; // Increment fine Y
                 false
-            } else {
+            } else { // fine_y == 7, wrap to 0 and potentially increment coarse_y
                 self.address &= !0x7000; // Fine Y = 0
                 let coarse_y = self.coarse_y();
-                if coarse_y == 29 {
+                if coarse_y == 29 || coarse_y == 31 { // Handle row 29 and wrap-around from 31
                     self.set_coarse_y(0); // Coarse Y = 0
                     self.address ^= 0x0800; // Switch vertical nametable
-                } else if coarse_y == 31 {
-                    self.set_coarse_y(0); // Coarse Y = 0, wraps without switching nametable
                 } else {
                     self.set_coarse_y(coarse_y + 1); // Increment coarse Y
                 }
                 true // Fine Y wrapped
-            }
+            };
+            // Log v *after* modification (Keep or remove logging as needed)
+            // println!("[inc_fine_y end] v: {:04X}", self.address);
+            wrapped
         }
 
         pub fn copy_horizontal_bits(&mut self, t: &AddrRegister) {
