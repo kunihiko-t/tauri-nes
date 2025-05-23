@@ -112,7 +112,7 @@ impl Ppu {
     }
 
     pub fn reset(&mut self) {
-        println!("PPU Reset started...");
+        // println!("PPU Reset started...");
         
         // PPUの内部状態をリセット
         self.cycle = 0;
@@ -188,7 +188,7 @@ impl Ppu {
         // マスクレジスタを更新して背景とスプライトを表示
         self.mask.set_bits(0x1E);  // 背景とスプライトを有効化（0x1EはBGとスプライト両方有効）
         
-        println!("PPU Reset complete. PPUCTRL=${:02X}, PPUMASK=${:02X}", self.ctrl.bits(), self.mask.bits());
+        // println!("PPU Reset complete. PPUCTRL=${:02X}, PPUMASK=${:02X}", self.ctrl.bits(), self.mask.bits());
     }
 
     // テスト用のパターンを描画
@@ -212,7 +212,7 @@ impl Ppu {
         };
         
         if should_log {
-            println!("初期テストパターンを描画中...");
+            // println!("初期テストパターンを描画中...");
         }
         
         // テストモード用のグラデーションパターンを描画
@@ -245,7 +245,7 @@ impl Ppu {
         }
         
         if should_log {
-            println!("初期テストパターン描画完了！");
+            // println!("初期テストパターン描画完了！");
         }
     }
 
@@ -392,162 +392,90 @@ impl Ppu {
     pub fn step_cycle(&mut self, bus: &impl BusAccess) -> bool {
         // Log state at the beginning of the cycle (less frequently)
         if self.cycle == 0 && self.scanline % 16 == 0 { // Log every 16 scanlines at cycle 0
-             println!("[Cycle Start] Scanline: {}, Cycle: {}, v: {:04X}, t: {:04X}",
-                      self.scanline, self.cycle, self.vram_addr.get(), self.temp_vram_addr.get());
+             // println!("[Cycle Start] Scanline: {}, Cycle: {}, v: {:04X}, t: {:04X}",
+                      // self.scanline, self.cycle, self.vram_addr.get(), self.temp_vram_addr.get());
         }
 
         let rendering_enabled = self.mask.show_background() || self.mask.show_sprites();
 
-        // --- Pre-render Scanline (-1 or 261) ---
-        if self.scanline == -1 || self.scanline == 261 {
-            if self.cycle == 1 {
-                // Clear VBlank, Sprite Overflow, Sprite Zero Hit flags
-                self.status.register &= !(0x80 | 0x20 | 0x40);
-                // TODO: Clear sprite shifters if needed
-            }
-            // Re-enable vertical address transfer
-            if self.cycle >= 280 && self.cycle <= 304 {
-                // Copy vertical bits from t to v if rendering is enabled
-                if rendering_enabled {
-                    // ... (Logging remains commented out or keep as is)
-                    self.transfer_address_y();
-                    // ... (Logging remains commented out or keep as is)
-                }
-            }
-            // --- End Re-enable ---
-            // TODO: Add other pre-render cycle actions (e.g., sprite fetches for scanline 0)
-        }
-
-        // --- Visible Scanlines (0-239) ---
-        if (0..=239).contains(&self.scanline) {
+        // Actions for Pre-render scanline (-1) AND visible scanlines (0-239)
+        // These are common operations related to fetching and VRAM address updates
+        if self.scanline == -1 || (0..=239).contains(&self.scanline) {
             // --- Background Processing Cycles (1-256) ---
             if (1..=256).contains(&self.cycle) {
-                
-                // Pixel rendering happens *before* shifters are updated for the next cycle
-                self.render_pixel();
-
-                // Shift background registers (happens on cycles 2-257 according to wiki)
-                // We shift *after* rendering the current pixel.
-                if self.mask.show_background() { // Only shift if background is enabled
-                    self.bg_shifter_pattern_lo <<= 1;
-                    self.bg_shifter_pattern_hi <<= 1;
-                    self.bg_shifter_attrib_lo <<= 1;
-                    self.bg_shifter_attrib_hi <<= 1;
+                if self.scanline != -1 { // Only render pixels on visible scanlines
+                    self.render_pixel();
                 }
 
-                // Perform fetches based on cycle phase (1, 3, 5, 7)
-                // and load shifters/increment scroll on cycle 8
-                match self.cycle % 8 {
-                    1 => { // Fetch Nametable byte for the *next* tile
-                        // Load shifters with the data fetched during the *previous* 8 cycles
-                        // This happens *before* fetching the NT byte for the *next* tile.
-                        self.load_background_shifters();
-
-                        // Log current vram_addr before fetch
-                        if self.cycle % 32 == 1 { // Log less frequently
-                            println!("[NT Fetch Cycle {}] v: {:04X}", self.cycle, self.vram_addr.get());
+                if rendering_enabled { // Shifting happens even on pre-render if rendering would be on
+                    // Shift background registers (happens on cycles 2-257 according to wiki)
+                    // We shift *after* rendering the current pixel.
+                    if self.mask.show_background() { // Only shift if background is enabled
+                        self.bg_shifter_pattern_lo <<= 1;
+                        self.bg_shifter_pattern_hi <<= 1;
+                        self.bg_shifter_attrib_lo <<= 1;
+                        self.bg_shifter_attrib_hi <<= 1;
+                    }
+                }
+                
+                // Perform fetches (this logic needs to run on pre-render too if rendering_enabled)
+                if rendering_enabled {
+                    match self.cycle % 8 {
+                        1 => { // Fetch Nametable byte for the *next* tile
+                            self.load_background_shifters();
+                            let nt_addr = 0x2000 | (self.vram_addr.get() & 0x0FFF);
+                            let mirrored_nt_addr = self.mirror_vram_addr(nt_addr, self.mirroring) as u16;
+                            self.bg_next_tile_id = bus.ppu_read_vram(mirrored_nt_addr);
                         }
-
-                        // Calculate address for Nametable byte
-                        let nt_addr = 0x2000 | (self.vram_addr.get() & 0x0FFF);
-                        let mirrored_nt_addr = self.mirror_vram_addr(nt_addr, self.mirroring) as u16;
-                        self.bg_next_tile_id = bus.ppu_read_vram(mirrored_nt_addr);
-                    }
-                    3 => { // Fetch Attribute Table byte
-                        // Calculate address for Attribute byte
-                        let nametable_select = (self.vram_addr.nametable_y() << 1) | self.vram_addr.nametable_x();
-                        let attr_addr: u16 = 0x23C0 | (nametable_select << 10)
-                                       | (((self.vram_addr.coarse_y() >> 2) as u16) << 3)
-                                       | ((self.vram_addr.coarse_x() >> 2) as u16);
-                        let mirrored_attr_addr = self.mirror_vram_addr(attr_addr, self.mirroring) as u16;
-                        let attr_byte = bus.ppu_read_vram(mirrored_attr_addr);
-                        // Calculate the shift needed to select the correct 2 bits from the attribute byte
-                        // based on the coarse X and Y coordinates within the 32x32 pixel attribute block.
-                        let shift = ((self.vram_addr.coarse_y() & 0x02) << 1) | (self.vram_addr.coarse_x() & 0x02);
-                        self.bg_next_tile_attr = (attr_byte >> shift) & 0x03;
-
-                        // --- Add Attribute Fetch Log ---
-                        // Log less frequently
-                        if self.cycle > 0 && (self.cycle % 32 == 3) && self.scanline >= 0 && (self.scanline % 16 == 0) { // Re-enable this log
-                             println!(
-                                 "AttrFetch [Cycle {}, Scanline {}]: addr={:04X} mirrored={:04X} byte={:02X} shift={} -> attr={:02X} (v={:04X})",
-                                 self.cycle, self.scanline,
-                                 attr_addr, mirrored_attr_addr, attr_byte, shift, self.bg_next_tile_attr, self.vram_addr.get()
-                             );
+                        3 => { // Fetch Attribute Table byte
+                            let nametable_select = (self.vram_addr.nametable_y() << 1) | self.vram_addr.nametable_x();
+                            let attr_addr: u16 = 0x23C0 | (nametable_select << 10)
+                                           | (((self.vram_addr.coarse_y() >> 2) as u16) << 3)
+                                           | ((self.vram_addr.coarse_x() >> 2) as u16);
+                            let mirrored_attr_addr = self.mirror_vram_addr(attr_addr, self.mirroring) as u16;
+                            let attr_byte = bus.ppu_read_vram(mirrored_attr_addr);
+                            let shift = ((self.vram_addr.coarse_y() & 0x02) << 1) | (self.vram_addr.coarse_x() & 0x02);
+                            self.bg_next_tile_attr = (attr_byte >> shift) & 0x03;
                         }
-                        // --- End Attribute Fetch Log ---
-                    }
-                    5 => { // Fetch Pattern Table Low byte
-                        let current_ctrl_bits = self.ctrl.bits();
-                        let pattern_table_base = self.ctrl.background_pattern_addr();
-                        let tile_addr = pattern_table_base + (self.bg_next_tile_id as u16 * 16);
-                        let fine_y = self.vram_addr.fine_y() as u16;
-                        let addr = tile_addr + fine_y;
-                        println!("[PT Fetch Low Cycle {}, Scanline {}] PPUCTRL=${:02X}, bits={:08b}, bit4={}, Table=${:04X}, TileID=${:02X}, FineY={}, Addr=${:04X}, Raw Ctrl Bits: {:08b}",
-                            self.cycle, self.scanline,
-                            current_ctrl_bits,
-                            current_ctrl_bits,
-                            (current_ctrl_bits & 0x10) >> 4,
-                            pattern_table_base,
-                            self.bg_next_tile_id,
-                            fine_y,
-                            addr,
-                            self.ctrl.bits());
-                        self.bg_next_tile_lsb = bus.ppu_read_vram(addr);
-                    }
-                    7 => { // Fetch Pattern Table High byte
-                        let pattern_table_base = self.ctrl.background_pattern_addr();
-                        let current_ctrl_bits = self.ctrl.bits();
-                        if self.cycle > 0 && self.cycle % 64 == 7 && self.scanline >= 0 {
-                            println!("[PT Fetch High Cycle {}, Scanline {}] TileID=${:02X}, Table=${:04X}, FineY={}, Addr=${:04X}",
-                                     self.cycle, self.scanline,
-                                     self.bg_next_tile_id,
-                                     pattern_table_base,
-                                     self.vram_addr.fine_y(),
-                                     pattern_table_base + (self.bg_next_tile_id as u16 * 16) + self.vram_addr.fine_y() as u16 + 8);
+                        5 => { // Fetch Pattern Table Low byte
+                            let pattern_table_base = self.ctrl.background_pattern_addr();
+                            let tile_addr = pattern_table_base + (self.bg_next_tile_id as u16 * 16);
+                            let fine_y = self.vram_addr.fine_y() as u16;
+                            let addr = tile_addr + fine_y;
+                            self.bg_next_tile_lsb = bus.ppu_read_vram(addr);
                         }
-
-                        let tile_addr = pattern_table_base + (self.bg_next_tile_id as u16 * 16);
-                        let fine_y = self.vram_addr.fine_y() as u16;
-                        
-                        // 2番目のプレーン（MSB）のアドレスを計算（+8バイトオフセット）
-                        let pattern_addr_high = tile_addr + fine_y + 8;
-                        self.bg_next_tile_msb = bus.ppu_read_vram(pattern_addr_high);
-                    }
-                    0 => { // End of 8-cycle fetch period (on cycles 8, 16, ..., 256)
-                        // Increment horizontal VRAM address (coarse X scroll)
-                        if rendering_enabled {
+                        7 => { // Fetch Pattern Table High byte
+                            let pattern_table_base = self.ctrl.background_pattern_addr();
+                            let tile_addr = pattern_table_base + (self.bg_next_tile_id as u16 * 16);
+                            let fine_y = self.vram_addr.fine_y() as u16;
+                            let pattern_addr_high = tile_addr + fine_y + 8;
+                            self.bg_next_tile_msb = bus.ppu_read_vram(pattern_addr_high);
+                        }
+                        0 => { // End of 8-cycle fetch period (on cycles 8, 16, ..., 256)
                             self.increment_scroll_x();
                         }
+                        _ => {} // Cycles 2, 4, 6: Idle background fetch cycles
                     }
-                    _ => {} // Cycles 2, 4, 6: Idle background fetch cycles
                 }
             }
 
             // --- Sprite Processing Cycles (257-320) ---
-            // TODO: Implement sprite evaluation, fetching sprite data for the *next* scanline
+            // TODO: Implement sprite evaluation for visible scanlines, 
+            //       and dummy sprite fetches for pre-render if necessary.
+            //       OAM Addr reset to 0 typically happens during cycles 257-320 of pre-render scanline.
+            //       If self.scanline == -1 && self.cycle >= 257 && self.cycle <= 320 { self.oam_addr = 0; }
 
-            // Reset horizontal VRAM address components at cycle 257 (transfer X bits from t to v)
-            if self.cycle == 257 {
-                 // Shift registers one last time for the scanline
-                 // self.update_background_shifters();
-                 if rendering_enabled {
-                    self.transfer_address_x();
-                 }
-                 // TODO: Handle OAM address reset (oam_addr = 0)
+            // Reset horizontal VRAM address components at cycle 257
+            if self.cycle == 257 && rendering_enabled {
+                self.transfer_address_x();
+                // if self.scanline == -1 { self.oam_addr = 0; } // Example of OAM addr reset on pre-render
             }
 
-             // --- Background Fetch Cycles for Next Scanline's First Two Tiles (321-336) ---
-             if (321..=336).contains(&self.cycle) {
-                 // Shift background registers (cycles 322-337, effectively done here for 321-336 pixel data)
-                 // if self.cycle > 321 {
-                 //    self.update_background_shifters();
-                 // }
-
-                 // Perform fetches like cycles 1-8
+            // Background Fetch Cycles for Next Scanline's First Two Tiles (321-336)
+            if (321..=336).contains(&self.cycle) && rendering_enabled {
                  match self.cycle % 8 {
-                     1 => { // Fetch NT byte (for first tile of *next* scanline)
-                         self.load_background_shifters(); // Load shifters for the dummy pixel render during these cycles
+                     1 => { 
+                         self.load_background_shifters();
                          let nt_addr = 0x2000 | (self.vram_addr.get() & 0x0FFF);
                          let mirrored_nt_addr = self.mirror_vram_addr(nt_addr, self.mirroring) as u16;
                          self.bg_next_tile_id = bus.ppu_read_vram(mirrored_nt_addr);
@@ -578,23 +506,38 @@ impl Ppu {
                          self.bg_next_tile_msb = bus.ppu_read_vram(pattern_addr_high);
                      }
                      0 => { // End of 8-cycle fetch (cycles 328, 336)
-                         // Increment horizontal VRAM address (coarse X scroll)
-                         if rendering_enabled {
-                             self.increment_scroll_x();
-                         }
+                         self.increment_scroll_x();
                      }
                      _ => {}
                  }
-             }
+            }
 
-            // Increment vertical VRAM address at the end of cycle 256 (just before cycle 257 transfer_x)
+            // Increment vertical VRAM address at the end of cycle 256
             if self.cycle == 256 && rendering_enabled {
                 self.increment_scroll_y();
             }
-        } // End Visible Scanlines (0-239)
+        } // End of common logic for scanlines -1 and 0-239
 
+        // Specific Pre-render Scanline (-1) actions (or scanline 261, which is an alias for pre-render)
+        if self.scanline == -1 || self.scanline == 261 { // scanline 261 is effectively the pre-render scanline
+            if self.cycle == 1 {
+                self.status.register &= !(StatusRegister::VBLANK_STARTED | StatusRegister::SPRITE_OVERFLOW | StatusRegister::SPRITE_ZERO_HIT);
+                // self.nmi_line_low = true; // NMI is cleared by reading $2002 or at end of VBlank
+            }
+            // Vertical address transfer from t to v
+            if self.cycle >= 280 && self.cycle <= 304 && rendering_enabled {
+                self.transfer_address_y();
+            }
+            // OAM Addr reset to 0 typically happens during cycles 257-320 of pre-render scanline
+            // This should be part of sprite processing logic for next scanline.
+            // For now, as a placeholder if not handled by sprite logic:
+            if self.cycle >= 257 && self.cycle <= 320 { // Placeholder for OAM addr reset timing
+                 // self.oam_addr = 0; // This would be part of sprite evaluation for next line.
+            }
+        }
+        
         // --- Post-render Scanline (240) ---
-        if self.scanline == 240 {
+        if self.scanline == 240 { // Note: scanline 261 is the pre-render scanline, not part of post-render.
             // PPU is idle, CPU runs freely
         }
 
@@ -645,15 +588,15 @@ impl Ppu {
         // --- Add Log BEFORE Loading ---
         // Log less frequently
         if self.cycle > 0 && (self.cycle % 32 == 1) && self.scanline >= 0 && (self.scanline % 16 == 0) {
-            println!(
-                "LoadShifters Pre [Cycle {}, Scanline {}]: \
-                 tile_id={:02X}, tile_attr={:02X}, lsb={:02X}, msb={:02X}, \
-                 PRE_pat_lo={:04X}, PRE_pat_hi={:04X}", // Add PRE shifter values
-                self.cycle, self.scanline,
-                self.bg_next_tile_id, self.bg_next_tile_attr,
-                self.bg_next_tile_lsb, self.bg_next_tile_msb,
-                self.bg_shifter_pattern_lo, self.bg_shifter_pattern_hi // Log current shifter values before load
-            );
+            // println!(
+                // "LoadShifters Pre [Cycle {}, Scanline {}]: \
+                 // tile_id={:02X}, tile_attr={:02X}, lsb={:02X}, msb={:02X}, \
+                 // PRE_pat_lo={:04X}, PRE_pat_hi={:04X}", // Add PRE shifter values
+                // self.cycle, self.scanline,
+                // self.bg_next_tile_id, self.bg_next_tile_attr,
+                // self.bg_next_tile_lsb, self.bg_next_tile_msb,
+                // self.bg_shifter_pattern_lo, self.bg_shifter_pattern_hi // Log current shifter values before load
+            // );
         }
         // --- End Log BEFORE Loading ---
 
@@ -674,12 +617,12 @@ impl Ppu {
         // --- DEBUG LOG AFTER Loading ---
         // Log less frequently
         if self.cycle > 0 && (self.cycle % 32 == 1) && self.scanline >= 0 && (self.scanline % 16 == 0) { // Re-enable this log
-             println!(
-                 "LoadShifters Post[Cycle {}, Scanline {}]: pat_lo={:04X}, pat_hi={:04X}, attr_lo={:04X}, attr_hi={:04X}",
-                 self.cycle, self.scanline,
-                 self.bg_shifter_pattern_lo, self.bg_shifter_pattern_hi,
-                 self.bg_shifter_attrib_lo, self.bg_shifter_attrib_hi
-             );
+             // println!(
+                 // "LoadShifters Post[Cycle {}, Scanline {}]: pat_lo={:04X}, pat_hi={:04X}, attr_lo={:04X}, attr_hi={:04X}",
+                 // self.cycle, self.scanline,
+                 // self.bg_shifter_pattern_lo, self.bg_shifter_pattern_hi,
+                 // self.bg_shifter_attrib_lo, self.bg_shifter_attrib_hi
+             // );
         }
         // --- END DEBUG LOG ---
     }
@@ -695,7 +638,7 @@ impl Ppu {
         }
         // Log vram_addr after potential change
         if self.cycle % 32 == 0 { // Log less frequently
-            println!("[IncScrollX Cycle {}] v: {:04X}", self.cycle, self.vram_addr.get());
+            // println!("[IncScrollX Cycle {}] v: {:04X}", self.cycle, self.vram_addr.get());
         }
     }
 
@@ -832,7 +775,7 @@ impl Ppu {
             .filter(|rgba| rgba[0] != 0 || rgba[1] != 0 || rgba[2] != 0) // Check if R, G, or B is non-zero
             .count();
 
-        println!("PPU render_frame: non-black pixels: {} / total pixels: {}", non_black_pixels, frame.width * frame.height);
+        // println!("PPU render_frame: non-black pixels: {} / total pixels: {}", non_black_pixels, frame.width * frame.height);
 
         frame
     }
@@ -887,29 +830,29 @@ impl Ppu {
     }
 
     pub fn increment_vram_addr(&mut self) {
-        println!("[PPU] increment_vram_addr called. Current addr: ${:04X}", self.vram_addr.addr()); // ★★★ Log entry
+        // println!("[PPU] increment_vram_addr called. Current addr: ${:04X}", self.vram_addr.addr()); // ★★★ Log entry
         let increment = if self.ctrl.vram_addr_increment() != 0 { 32 } else { 1 }; // Check if the flag is non-zero
         self.vram_addr.increment(increment);
         // VRAM addresses wrap around above $3FFF, actual mirroring handled by bus read/write
         // self.vram_addr.set(self.vram_addr.get() % 0x4000); // Don't do simplified wrapping here
-        println!("[PPU Inc VRAM Addr] Incremented by {}. New Addr Reg: {:?}", increment, self.vram_addr);
+        // println!("[PPU Inc VRAM Addr] Incremented by {}. New Addr Reg: {:?}", increment, self.vram_addr);
     }
 
     pub fn write_ctrl(&mut self, data: u8) {
         let old_nmi_enable = self.ctrl.generate_nmi(); // Use helper method
         let old_bits = self.ctrl.bits();
-        println!("[PPU Write CTRL] Old bits=${:02X}, New bits=${:02X}", old_bits, data);
-        println!("[PPU Write CTRL] Old BG Pattern=${:04X}, New BG Pattern will be=${:04X}",
-                 if (old_bits & 0x10) == 0 { 0x0000 } else { 0x1000 },
-                 if (data & 0x10) == 0 { 0x0000 } else { 0x1000 });
+        // println!("[PPU Write CTRL] Old bits=${:02X}, New bits=${:02X}", old_bits, data);
+        // println!("[PPU Write CTRL] Old BG Pattern=${:04X}, New BG Pattern will be=${:04X}",
+                 // if (old_bits & 0x10) == 0 { 0x0000 } else { 0x1000 },
+                 // if (data & 0x10) == 0 { 0x0000 } else { 0x1000 });
         
         self.ctrl.set_bits(data); // Use setter method
         
         // Verify the bits were actually set
-        println!("[PPU Write CTRL] Verification: CTRL bits=${:02X}, BG Pattern=${:04X}, NMI={}, Sprite Pattern=${:04X}, VRAM Inc={}",
-                 self.ctrl.bits(), self.ctrl.background_pattern_addr(),
-                 self.ctrl.generate_nmi(), self.ctrl.sprite_pattern_addr(),
-                 self.ctrl.vram_addr_increment());
+        // println!("[PPU Write CTRL] Verification: CTRL bits=${:02X}, BG Pattern=${:04X}, NMI={}, Sprite Pattern=${:04X}, VRAM Inc={}",
+                 // self.ctrl.bits(), self.ctrl.background_pattern_addr(),
+                 // self.ctrl.generate_nmi(), self.ctrl.sprite_pattern_addr(),
+                 // self.ctrl.vram_addr_increment());
         
         // Update temp VRAM address nametable select bits
         let nametable_select = data & 0b11;
@@ -938,21 +881,21 @@ impl Ppu {
 
     pub fn write_scroll(&mut self, data: u8) {
         // <<< Add Log >>>
-        println!("[PPU $2005 Write] Data=${:02X}, Latch={}", data, self.address_latch_low);
+        // println!("[PPU $2005 Write] Data=${:02X}, Latch={}", data, self.address_latch_low);
 
         if self.address_latch_low {
             // First write (X scroll)
             self.temp_vram_addr.set_coarse_x(data >> 3);
             self.fine_x_scroll = data & 0x07;
             // <<< Add Log >>>
-            println!("  -> First write: coarse_x={}, fine_x={}", data >> 3, self.fine_x_scroll);
+            // println!("  -> First write: coarse_x={}, fine_x={}", data >> 3, self.fine_x_scroll);
             self.address_latch_low = false;
         } else {
             // Second write (Y scroll)
             self.temp_vram_addr.set_fine_y(data & 0x07);
             self.temp_vram_addr.set_coarse_y(data >> 3);
              // <<< Add Log >>>
-            println!("  -> Second write: coarse_y={}, fine_y={}", data >> 3, data & 0x07);
+            // println!("  -> Second write: coarse_y={}, fine_y={}", data >> 3, data & 0x07);
            self.address_latch_low = true;
         }
     }
@@ -1110,7 +1053,7 @@ impl Ppu {
             0x1C => 0x0C,
             _ => mapped_addr,
         };
-        println!("[PPU Write Palette] Writing Data=${:02X} to Addr=${:04X} (Mapped from {:04X})", data, final_addr, addr);
+        // println!("[PPU Write Palette] Writing Data=${:02X} to Addr=${:04X} (Mapped from {:04X})", data, final_addr, addr);
         self.palette_ram[final_addr] = data;
     }
 
@@ -1132,22 +1075,22 @@ impl Ppu {
     // $2007 PPUDATA Write Handler
     pub fn write_data(&mut self, data: u8, bus: &mut impl BusAccess) {
         let addr = self.vram_addr.get();
-        println!("[PPU $2007 Write] write_data function entered! VRAM Addr=${:04X}, Data=${:02X}", addr, data); // ★★★ Log entry
+        // println!("[PPU $2007 Write] write_data function entered! VRAM Addr=${:04X}, Data=${:02X}", addr, data); // ★★★ Log entry
 
         // Write to appropriate memory (Palette RAM or VRAM/CHR via bus)
         if addr >= 0x3F00 {
             // Palette RAM write
-            println!("[PPU $2007 Write] Writing to Palette RAM addr=${:04X}", addr);
+            // println!("[PPU $2007 Write] Writing to Palette RAM addr=${:04X}", addr);
             self.write_palette_ram(addr, data); // Use the existing internal function
         } else {
             // VRAM/CHR write via bus
-            println!("[PPU $2007 Write] Writing to VRAM/CHR via bus addr=${:04X}", addr);
+            // println!("[PPU $2007 Write] Writing to VRAM/CHR via bus addr=${:04X}", addr);
             bus.ppu_write_vram(addr, data); // <- 修正後: PPU VRAM 書き込み用のメソッドを使用
         }
 
         // Increment VRAM address based on PPUCTRL setting
         self.increment_vram_addr();
-        println!("[PPU $2007 Write] VRAM address incremented. New VRAM Addr=${:04X}", self.vram_addr.get());
+        // println!("[PPU $2007 Write] VRAM address incremented. New VRAM Addr=${:04X}", self.vram_addr.get());
     }
 }
 
