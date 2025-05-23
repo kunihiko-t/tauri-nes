@@ -132,11 +132,11 @@ function App() {
             ctx.fillText('Drawing Error', 10, height / 2);
         }
 
-        // Request the next frame after a short delay
-        setTimeout(() => {
-            animationFrameId.current = requestAnimationFrame(drawFrame); // Pass drawFrame directly
-        }, 16); // Add a delay (e.g., 16ms for ~60fps)
-    }, [canvasCtx]); // Dependencies for useCallback
+        // Schedule the next frame if the emulator is running
+        if (isRunning) {
+            animationFrameId.current = requestAnimationFrame(drawFrame);
+        }
+    }, [canvasCtx, isRunning, drawFrame]); // Added isRunning and drawFrame to dependencies
 
     useEffect(() => {
         console.log("Canvas Ref Initialized:", canvasRef.current);
