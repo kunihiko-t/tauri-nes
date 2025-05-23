@@ -521,7 +521,7 @@ impl Ppu {
         // Specific Pre-render Scanline (-1) actions (or scanline 261, which is an alias for pre-render)
         if self.scanline == -1 || self.scanline == 261 { // scanline 261 is effectively the pre-render scanline
             if self.cycle == 1 {
-                self.status.register &= !(StatusRegister::VBLANK_STARTED | StatusRegister::SPRITE_OVERFLOW | StatusRegister::SPRITE_ZERO_HIT);
+                self.status.register &= !(0x80 | 0x40 | 0x20); // VBLANK_STARTED (0x80), SPRITE_ZERO_HIT (0x40), SPRITE_OVERFLOW (0x20)
                 // self.nmi_line_low = true; // NMI is cleared by reading $2002 or at end of VBlank
             }
             // Vertical address transfer from t to v
